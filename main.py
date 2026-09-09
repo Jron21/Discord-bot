@@ -1,12 +1,22 @@
 import os
 import random
 import asyncio
+import json
 import logging
+from html import unescape
+from pathlib import Path
 import re
+import shutil
+import tempfile
+import time
+from urllib.parse import quote, urljoin, urlparse
+from html.parser import HTMLParser
+from urllib.request import Request, urlopen
 
 import discord
 from dotenv import load_dotenv
 from discord.ext import commands
+from yt_dlp import DownloadError, YoutubeDL
 
 load_dotenv()
 
@@ -16,12 +26,33 @@ load_dotenv()
 # ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
+MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("Sora10Chan")
+
+SOCIAL_MEDIA_URL_PATTERN = re.compile(
+    r"https?://(?:www\.)?(?:"
+    r"facebook\.com|fb\.watch|"
+    r"tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|"
+    r"instagram\.com|"
+    r"twitter\.com|x\.com"
+    r")[^\s<>]+",
+    re.IGNORECASE,
+)
+
+TWITTER_TWEET_ID_PATTERN = re.compile(
+    r"(?:twitter\.com|x\.com)/[^/]+/status(?:es)?/(\d+)",
+    re.IGNORECASE,
+)
+
+INSTAGRAM_POST_PATTERN = re.compile(
+    r"instagram\.com/p/([^/?#]+)",
+    re.IGNORECASE,
+)
 
 
 # ============================================================
@@ -227,6 +258,9 @@ target_voice_channels: dict[int, int] = {}
 # guild_id -> asyncio.Task
 voice_reconnect_tasks: dict[int, asyncio.Task] = {}
 
+# Active reminder tasks.
+reminder_tasks: set[asyncio.Task] = set()
+
 
 def random_item(items):
     return random.choice(items)
@@ -234,6 +268,404 @@ def random_item(items):
 
 async def send_message(message: discord.Message, content: str) -> None:
     await message.channel.send(content)
+
+
+class OpenGraphImageParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.image_url: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]):
+        if tag != "meta" or self.image_url is not None:
+            return
+
+        attributes = dict(attrs)
+        property_name = attributes.get("property") or attributes.get("name")
+        if property_name in ("og:image", "twitter:image"):
+            self.image_url = attributes.get("content")
+
+
+def download_image_url(
+    image_url: str,
+    directory: str,
+    filename: str,
+) -> Path | None:
+    url_extension = Path(urlparse(image_url).path).suffix.lower()
+    if "dst-jpg" in image_url or url_extension == ".heic":
+        url_extension = ".jpg"
+    extension = url_extension or ".jpg"
+    temporary_path = Path(directory) / f"{filename}.download"
+    request = Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urlopen(request, timeout=30) as response, temporary_path.open("wb") as output:
+            content_type = response.headers.get_content_type()
+            extension = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+                "image/gif": ".gif",
+                "image/webp": ".webp",
+            }.get(content_type, extension)
+            shutil.copyfileobj(response, output)
+    except OSError:
+        return None
+
+    image_path = Path(directory) / f"{filename}{extension}"
+    temporary_path.replace(image_path)
+    return image_path
+
+
+def download_open_graph_image(url: str, directory: str) -> Path | None:
+    """Download an image exposed in a supported page's metadata."""
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    parser = OpenGraphImageParser()
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            parser.feed(response.read().decode("utf-8", errors="ignore"))
+    except (OSError, UnicodeError):
+        return None
+
+    if not parser.image_url:
+        return None
+
+    image_url = urljoin(url, parser.image_url)
+    return download_image_url(image_url, directory, "open-graph-image")
+
+
+def download_tiktok_photo(url: str, directory: str) -> list[Path]:
+    """Download images from a TikTok photo post page."""
+    api_url = f"https://www.tikwm.com/api/?url={quote(url, safe='')}"
+    api_request = Request(
+        api_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+
+    try:
+        with urlopen(api_request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = {}
+
+    api_images = (payload.get("data") or {}).get("images") or []
+    paths = []
+    for image_index, image_url in enumerate(api_images, start=1):
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"tiktok-photo-{image_index}",
+        )
+        if image_path is not None:
+            paths.append(image_path)
+
+    if paths:
+        return paths
+
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            page = response.read().decode("utf-8", errors="ignore")
+    except (OSError, UnicodeError):
+        return []
+
+    image_urls = re.findall(
+        r'"(?:imageURL|image_url|display_image|originCover)"\s*:\s*'
+        r'"((?:\\.|[^"\\])+)',
+        page,
+        re.IGNORECASE,
+    )
+    image_urls.extend(
+        re.findall(
+            r'https?:\\?/\\?/[^"\'\s]+(?:\.jpe?g|\.png|\.webp|\.avif)'
+            r'(?:[^"\'\s]*)',
+            page,
+            re.IGNORECASE,
+        )
+    )
+    image_urls.extend(
+        re.findall(
+            r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)'
+            r'["\'][^>]+content=["\']([^"\']+)',
+            page,
+            re.IGNORECASE,
+        )
+    )
+
+    paths = []
+    for image_index, image_url in enumerate(dict.fromkeys(image_urls), start=1):
+        image_url = unescape(image_url).replace(r"\/", "/")
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"tiktok-photo-{image_index}",
+        )
+        if image_path is not None:
+            paths.append(image_path)
+
+    return paths
+
+
+def download_instagram_images(url: str, directory: str) -> list[Path]:
+    """Download all images exposed by an Instagram carousel embed."""
+    match = INSTAGRAM_POST_PATTERN.search(url)
+    if match is None:
+        return []
+
+    embed_url = f"https://www.instagram.com/p/{match.group(1)}/embed/captioned/"
+    request = Request(embed_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            page = response.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    embedded_image_urls = re.findall(
+        r'EmbeddedMediaImage[^>]*?src=["\']([^"\']+)',
+        page,
+        re.IGNORECASE,
+    )
+    escaped_image_urls = []
+    search_position = 0
+    while True:
+        marker_position = page.lower().find("display_url", search_position)
+        if marker_position < 0:
+            break
+
+        url_start = page.find("https:", marker_position)
+        next_field = page.find("display_resources", url_start)
+        next_display = page.lower().find("display_url", url_start)
+        field_positions = [position for position in (next_field, next_display) if position >= 0]
+        next_field = min(field_positions) if field_positions else len(page)
+        if url_start >= 0:
+            escaped_image_urls.append(page[url_start:next_field].rstrip('\\",'))
+        search_position = marker_position + len("display_url")
+
+    normalized_page = (
+        page.replace(r"\/", "/")
+        .replace(r"\u0026", "&")
+        .replace(r"\u00253D", "%3D")
+        .replace("&amp;", "&")
+        .replace("\\", "")
+    )
+    image_urls = embedded_image_urls
+    image_urls.extend(escaped_image_urls)
+    image_urls = [
+        unescape(image_url).replace(r"\/", "/")
+        .replace(r"\u0026", "&")
+        .replace(r"\u00253D", "%3D")
+        .replace("\\", "")
+        for image_url in image_urls
+    ]
+
+    unique_urls = list(dict.fromkeys(image_urls))
+    paths = []
+    for image_index, image_url in enumerate(unique_urls, start=1):
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"instagram-{match.group(1)}-{image_index}",
+        )
+        if image_path is not None:
+            paths.append(image_path)
+
+    return paths
+
+
+def download_social_media(url: str, directory: str) -> list[Path]:
+    """Download videos or images from a supported social-media item."""
+    options = {
+        "noplaylist": True,
+        "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
+        "format": "best[ext=mp4]/best",
+        "quiet": True,
+        "no_warnings": True,
+        "restrictfilenames": True,
+    }
+
+    with YoutubeDL(options) as downloader:
+        try:
+            info = downloader.extract_info(url, download=False)
+        except DownloadError:
+            instagram_images = download_instagram_images(url, directory)
+            if instagram_images:
+                return instagram_images
+            tiktok_photos = download_tiktok_photo(url, directory)
+            if tiktok_photos:
+                return tiktok_photos
+            twitter_image = download_twitter_image(url, directory)
+            if twitter_image is not None:
+                return [twitter_image]
+            open_graph_image = download_open_graph_image(url, directory)
+            if open_graph_image is not None:
+                return [open_graph_image]
+            raise
+
+        entries = list(info.get("entries") or [info])
+
+        video_entry = next(
+            (entry for entry in entries if entry.get("formats")),
+            None,
+        )
+
+        if video_entry is not None:
+            downloader.download([url])
+        else:
+            instagram_images = download_instagram_images(url, directory)
+            if instagram_images:
+                return instagram_images
+            image_entry = next(
+                (
+                    entry for entry in entries
+                    if entry.get("thumbnail") or entry.get("url")
+                ),
+                None,
+            )
+            if image_entry is None:
+                twitter_image = download_twitter_image(url, directory)
+                if twitter_image is not None:
+                    return [twitter_image]
+                open_graph_image = download_open_graph_image(url, directory)
+                if open_graph_image is not None:
+                    return [open_graph_image]
+                raise DownloadError("No video or image was found")
+
+            image_url = image_entry.get("thumbnail") or image_entry.get("url")
+            image_path = download_image_url(
+                image_url,
+                directory,
+                str(image_entry.get("id", "image")),
+            )
+            if image_path is None:
+                raise DownloadError("The image could not be downloaded")
+
+    files = [path for path in Path(directory).iterdir() if path.is_file()]
+    if not files:
+        raise DownloadError("No media file was downloaded")
+
+    return [max(files, key=lambda path: path.stat().st_mtime)]
+
+
+def download_twitter_image(url: str, directory: str) -> Path | None:
+    """Download the first public image exposed by a Twitter/X post."""
+    match = TWITTER_TWEET_ID_PATTERN.search(url)
+    if match is None:
+        return None
+
+    tweet_id = match.group(1)
+    syndication_token = f"{int(tweet_id) / 1e15:.15g}"
+    endpoint = (
+        "https://cdn.syndication.twimg.com/tweet-result?"
+        f"id={tweet_id}&lang=en&token={syndication_token}"
+    )
+    request = Request(endpoint, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            tweet_data = json.load(response)
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    media = next(
+        (
+            item for item in tweet_data.get("mediaDetails", [])
+            if item.get("type") == "photo" and item.get("media_url_https")
+        ),
+        None,
+    )
+    if media is None:
+        return None
+
+    return download_image_url(
+        media["media_url_https"],
+        directory,
+        f"twitter-{tweet_id}",
+    )
+
+
+async def extract_social_media(message: discord.Message, url: str) -> None:
+    """Download and send a supported social-media link."""
+    with tempfile.TemporaryDirectory(prefix="sora10chan-media-") as directory:
+        try:
+            async with message.channel.typing():
+                media_paths = await asyncio.to_thread(
+                    download_social_media,
+                    url,
+                    directory,
+                )
+        except DownloadError:
+            await message.reply(
+                "I couldn't extract media from that link. It may be private, "
+                "unsupported, or require a login.",
+                mention_author=False,
+            )
+            return
+        except Exception:
+            logger.exception("Social-media extraction failed for %s", url)
+            await message.reply(
+                "Something went wrong while downloading that media.",
+                mention_author=False,
+            )
+            return
+
+        if any(path.stat().st_size > MAX_MEDIA_BYTES for path in media_paths):
+            size_mb = MAX_MEDIA_BYTES / (1024 * 1024)
+            await message.reply(
+                f"That media is too large for me to upload. The limit is "
+                f"{size_mb:.0f} MB.",
+                mention_author=False,
+            )
+            return
+
+        try:
+            if len(media_paths) == 1:
+                await message.reply(
+                    file=discord.File(str(media_paths[0])),
+                    mention_author=False,
+                )
+            else:
+                for batch_start in range(0, len(media_paths), 10):
+                    batch = media_paths[batch_start:batch_start + 10]
+                    files = [discord.File(str(path)) for path in batch]
+                    if batch_start == 0:
+                        await message.reply(files=files, mention_author=False)
+                    else:
+                        await message.channel.send(files=files)
+        except discord.HTTPException:
+            logger.exception("Discord rejected extracted media for %s", url)
+            await message.reply(
+                "Discord could not upload that media file.",
+                mention_author=False,
+            )
+
+
+async def find_social_media_url(message: discord.Message) -> str | None:
+    """Find a supported URL in a message or the message it replies to."""
+    match = SOCIAL_MEDIA_URL_PATTERN.search(message.content)
+    if match:
+        return match.group(0)
+
+    reference = message.reference
+    if reference is None or reference.message_id is None:
+        return None
+
+    referenced_message = reference.resolved
+    if not isinstance(referenced_message, discord.Message):
+        if not hasattr(message.channel, "fetch_message"):
+            return None
+        try:
+            referenced_message = await message.channel.fetch_message(
+                reference.message_id
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    match = SOCIAL_MEDIA_URL_PATTERN.search(referenced_message.content)
+    return match.group(0) if match else None
 
 
 # ============================================================
@@ -328,6 +760,31 @@ async def reconnect_voice(guild_id: int, channel_id: int) -> None:
         schedule_voice_reconnect(guild_id, channel_id)
 
 
+def parse_duration(value: str) -> int | None:
+    """Convert values like '3days 2hours 1minute' to seconds."""
+    pattern = re.compile(
+        r"(?P<amount>\d+)\s*(?P<unit>d(?:ays?)?|h(?:ours?)?|m(?:in(?:ute)?s?)?)",
+        re.IGNORECASE,
+    )
+    matches = list(pattern.finditer(value))
+
+    if not matches or "".join(match.group(0) for match in matches).replace(" ", "") != value.replace(" ", ""):
+        return None
+
+    total_seconds = 0
+    for match in matches:
+        amount = int(match.group("amount"))
+        unit = match.group("unit").lower()
+        if unit.startswith("d"):
+            total_seconds += amount * 86400
+        elif unit.startswith("h"):
+            total_seconds += amount * 3600
+        else:
+            total_seconds += amount * 60
+
+    return total_seconds if total_seconds > 0 else None
+
+
 # ============================================================
 # Bot events
 # ============================================================
@@ -376,8 +833,23 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    command = message.content.strip().lower()
+    content = message.content.strip()
+    command = content.lower()
     username = message.author.name
+
+    sora_match = re.fullmatch(r"!sora(?:\s+(.+))?", content, re.IGNORECASE)
+    if sora_match:
+        url = sora_match.group(1)
+        url_match = SOCIAL_MEDIA_URL_PATTERN.search(url or "")
+        if url_match is None:
+            await message.reply(
+                "Use `!sora <Facebook, TikTok, Instagram, Twitter, or X link>.",
+                mention_author=False,
+            )
+            return
+
+        await extract_social_media(message, url_match.group(0))
+        return
 
     if command == "*ashu":
         await send_message(message, random_item(ASUKA_IMAGES))
@@ -452,6 +924,11 @@ async def on_message(message: discord.Message):
             )
         return
 
+    social_media_url = await find_social_media_url(message)
+    if social_media_url:
+        await extract_social_media(message, social_media_url)
+        return
+
     # Preserve the original behavior: hello/bye only work in #bot.
     if isinstance(message.channel, discord.TextChannel):
         if message.channel.name == "bot" and command == "hello":
@@ -485,6 +962,127 @@ async def test(interaction: discord.Interaction):
 
 
 @bot.tree.command(
+    name="download",
+    description="Download media from Facebook, TikTok, Instagram, or X",
+)
+async def download(interaction: discord.Interaction, url: str):
+    await send_downloaded_media(interaction, url)
+
+
+@bot.tree.command(
+    name="media",
+    description="Extract an image, video, or carousel from a social link",
+)
+async def media(interaction: discord.Interaction, url: str):
+    await send_downloaded_media(interaction, url)
+
+
+async def send_downloaded_media(
+    interaction: discord.Interaction,
+    url: str,
+) -> None:
+    url = url.strip()
+    if SOCIAL_MEDIA_URL_PATTERN.fullmatch(url) is None:
+        await interaction.response.send_message(
+            "Use a Facebook, TikTok, Instagram, Twitter, or X link.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.defer()
+
+    with tempfile.TemporaryDirectory(prefix="sora10chan-media-") as directory:
+        try:
+            media_paths = await asyncio.to_thread(
+                download_social_media,
+                url,
+                directory,
+            )
+        except DownloadError:
+            await interaction.followup.send(
+                "I couldn't extract media from that link. It may be private, "
+                "unsupported, or require a login."
+            )
+            return
+        except Exception:
+            logger.exception("Slash-command media extraction failed for %s", url)
+            await interaction.followup.send(
+                "Something went wrong while downloading that media."
+            )
+            return
+
+        if any(path.stat().st_size > MAX_MEDIA_BYTES for path in media_paths):
+            size_mb = MAX_MEDIA_BYTES / (1024 * 1024)
+            await interaction.followup.send(
+                f"That media is too large for me to upload. The limit is "
+                f"{size_mb:.0f} MB."
+            )
+            return
+
+        try:
+            if len(media_paths) == 1:
+                await interaction.followup.send(
+                    file=discord.File(str(media_paths[0]))
+                )
+            else:
+                for batch_start in range(0, len(media_paths), 10):
+                    batch = media_paths[batch_start:batch_start + 10]
+                    files = [discord.File(str(path)) for path in batch]
+                    await interaction.followup.send(files=files)
+        except discord.HTTPException:
+            logger.exception("Discord rejected slash-command media for %s", url)
+            await interaction.followup.send(
+                "Discord could not upload that media file."
+            )
+
+
+@bot.tree.command(
+    name="reminder",
+    description="Remind you after a duration, such as 3d 2h 1m",
+)
+async def reminder(
+    interaction: discord.Interaction,
+    duration: str,
+    text: str,
+):
+    seconds = parse_duration(duration)
+    if seconds is None:
+        await interaction.response.send_message(
+            "Use a duration like `3d 2h 1m`, `3days 2hours 1minute`, "
+            "or `30m`.",
+            ephemeral=True,
+        )
+        return
+
+    if interaction.channel is None:
+        await interaction.response.send_message(
+            "I couldn't find the channel for this reminder.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"Reminder set for <t:{int(time.time()) + seconds}:R>.",
+        ephemeral=True,
+    )
+
+    channel = interaction.channel
+    user = interaction.user
+
+    async def deliver_reminder() -> None:
+        try:
+            await asyncio.sleep(seconds)
+            await channel.send(f"{user.mention} Reminder: {text}")
+        except discord.DiscordException:
+            logger.exception("Could not deliver reminder for user %s", user.id)
+        finally:
+            reminder_tasks.discard(asyncio.current_task())
+
+    task = asyncio.create_task(deliver_reminder())
+    reminder_tasks.add(task)
+
+
+@bot.tree.command(
     name="join",
     description="Join your current voice channel",
 )
@@ -508,13 +1106,13 @@ async def join(interaction: discord.Interaction):
             )
             return
 
-    voice_channel = member.voice.channel
-
-    if voice_channel is None:
+    if member.voice is None or member.voice.channel is None:
         await interaction.followup.send(
             "Join a voice channel first, then use `/join` again."
         )
         return
+
+    voice_channel = member.voice.channel
 
     if not isinstance(
         voice_channel,
