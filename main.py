@@ -270,6 +270,25 @@ async def send_message(message: discord.Message, content: str) -> None:
     await message.channel.send(content)
 
 
+async def send_single_keyword_image(
+    message: discord.Message,
+    image_url: str,
+) -> None:
+    """Send a keyword image as one attachment, without an extra embed."""
+    with tempfile.TemporaryDirectory(prefix="sora10chan-response-") as directory:
+        image_path = await asyncio.to_thread(
+            download_image_url,
+            image_url,
+            directory,
+            "keyword-response",
+        )
+        if image_path is None:
+            await send_message(message, image_url)
+            return
+
+        await message.channel.send(file=discord.File(str(image_path)))
+
+
 class OpenGraphImageParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -478,6 +497,13 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
 
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
+    is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
+
+    if is_twitter_status:
+        twitter_image = download_twitter_image(url, directory)
+        if twitter_image is not None:
+            return [twitter_image]
+
     options = {
         "noplaylist": True,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
@@ -491,15 +517,17 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         try:
             info = downloader.extract_info(url, download=False)
         except DownloadError:
+            twitter_image = download_twitter_image(url, directory)
+            if twitter_image is not None:
+                return [twitter_image]
+            if is_twitter_status:
+                raise DownloadError("No image was found in the Twitter/X post")
             instagram_images = download_instagram_images(url, directory)
             if instagram_images:
                 return instagram_images
             tiktok_photos = download_tiktok_photo(url, directory)
             if tiktok_photos:
                 return tiktok_photos
-            twitter_image = download_twitter_image(url, directory)
-            if twitter_image is not None:
-                return [twitter_image]
             open_graph_image = download_open_graph_image(url, directory)
             if open_graph_image is not None:
                 return [open_graph_image]
@@ -515,6 +543,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         if video_entry is not None:
             downloader.download([url])
         else:
+            if is_twitter_status:
+                raise DownloadError("No image was found in the Twitter/X post")
             instagram_images = download_instagram_images(url, directory)
             if instagram_images:
                 return instagram_images
@@ -837,6 +867,10 @@ async def on_message(message: discord.Message):
     command = content.lower()
     username = message.author.name
 
+    if command == "!s" or command.startswith("!s "):
+        await bot.process_commands(message)
+        return
+
     sora_match = re.fullmatch(r"!sora(?:\s+(.+))?", content, re.IGNORECASE)
     if sora_match:
         url = sora_match.group(1)
@@ -869,7 +903,10 @@ async def on_message(message: discord.Message):
 
     direct_response = direct_responses.get(command)
     if direct_response:
-        await send_message(message, direct_response)
+        if command in ("nice", "wtf"):
+            await send_single_keyword_image(message, direct_response)
+        else:
+            await send_message(message, direct_response)
         return
 
     if command in ("good morning", "ohayou"):
@@ -922,11 +959,6 @@ async def on_message(message: discord.Message):
                 message,
                 "The original source did not include an image link for this entry.",
             )
-        return
-
-    social_media_url = await find_social_media_url(message)
-    if social_media_url:
-        await extract_social_media(message, social_media_url)
         return
 
     # Preserve the original behavior: hello/bye only work in #bot.
@@ -1195,6 +1227,112 @@ async def leave(interaction: discord.Interaction):
 
     await connection.disconnect()
     await interaction.followup.send("Left the voice channel.")
+
+
+@bot.group(name="s", invoke_without_command=True)
+async def local_s(ctx: commands.Context):
+    """Run a slash command locally with the !s prefix."""
+    await ctx.send(
+        "Use `!s ping`, `!s test`, `!s download <url>`, `!s media <url>`, "
+        "`!s reminder <duration> <text>`, `!s join`, or `!s leave`."
+    )
+
+
+@local_s.command(name="ping")
+async def local_ping(ctx: commands.Context):
+    await ctx.send(f"Pong! WebSocket latency: {round(bot.latency * 1000)}ms")
+
+
+@local_s.command(name="test")
+async def local_test(ctx: commands.Context):
+    await ctx.send("Sora10Chan local commands are working!")
+
+
+async def send_local_media(ctx: commands.Context, url: str) -> None:
+    url_match = SOCIAL_MEDIA_URL_PATTERN.fullmatch(url.strip())
+    if url_match is None:
+        await ctx.send("Use a Facebook, TikTok, Instagram, Twitter, or X link.")
+        return
+    await extract_social_media(ctx.message, url_match.group(0))
+
+
+@local_s.command(name="download")
+async def local_download(ctx: commands.Context, url: str):
+    await send_local_media(ctx, url)
+
+
+@local_s.command(name="media")
+async def local_media(ctx: commands.Context, url: str):
+    await send_local_media(ctx, url)
+
+
+@local_s.command(name="reminder")
+async def local_reminder(ctx: commands.Context, duration: str, *, text: str):
+    seconds = parse_duration(duration)
+    if seconds is None:
+        await ctx.send(
+            "Use a duration like `3d 2h 1m`, `3days 2hours 1minute`, or `30m`."
+        )
+        return
+
+    await ctx.send(f"Reminder set for <t:{int(time.time()) + seconds}:R>.")
+
+    async def deliver_local_reminder() -> None:
+        try:
+            await asyncio.sleep(seconds)
+            await ctx.send(f"{ctx.author.mention} Reminder: {text}")
+        except discord.DiscordException:
+            logger.exception("Could not deliver local reminder for user %s", ctx.author.id)
+        finally:
+            reminder_tasks.discard(asyncio.current_task())
+
+    task = asyncio.create_task(deliver_local_reminder())
+    reminder_tasks.add(task)
+
+
+@local_s.command(name="join")
+async def local_join(ctx: commands.Context):
+    if ctx.guild is None or ctx.author.voice is None or ctx.author.voice.channel is None:
+        await ctx.send("Join a voice channel first, then use `!s join` again.")
+        return
+
+    voice_channel = ctx.author.voice.channel
+    if not isinstance(voice_channel, (discord.VoiceChannel, discord.StageChannel)):
+        await ctx.send("I couldn't connect to that voice channel.")
+        return
+
+    existing = ctx.guild.voice_client
+    target_voice_channels[ctx.guild.id] = voice_channel.id
+    try:
+        if existing is not None:
+            await existing.move_to(voice_channel)
+        else:
+            await voice_channel.connect(self_deaf=True)
+        await ctx.send(f"Joined <#{voice_channel.id}>.")
+    except Exception:
+        target_voice_channels.pop(ctx.guild.id, None)
+        logger.exception("Could not join voice channel from local command")
+        await ctx.send("I couldn't connect to that voice channel.")
+
+
+@local_s.command(name="leave")
+async def local_leave(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+
+    target_voice_channels.pop(ctx.guild.id, None)
+    task = voice_reconnect_tasks.pop(ctx.guild.id, None)
+    if task is not None and not task.done():
+        task.cancel()
+
+    connection = ctx.guild.voice_client
+    if connection is None:
+        await ctx.send("I am not currently in a voice channel.")
+        return
+
+    await connection.disconnect()
+    await ctx.send("Left the voice channel.")
 
 
 # ============================================================
