@@ -57,6 +57,7 @@ def resolve_ffmpeg_path() -> str:
 
 FFMPEG_PATH = resolve_ffmpeg_path()
 MAX_SPOTIFY_PLAYLIST_TRACKS = 100
+YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE")
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -933,11 +934,21 @@ def resolve_music_track(url: str) -> MusicTrack:
         "no_warnings": True,
         "noplaylist": True,
         "format": "bestaudio/best",
+        "retries": 3,
+        "fragment_retries": 3,
+        "extractor_retries": 3,
+        "file_access_retries": 3,
         "http_headers": {
             "User-Agent": BROWSER_USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
         },
     }
+    if YOUTUBE_COOKIES_FILE:
+        cookie_path = Path(YOUTUBE_COOKIES_FILE).expanduser()
+        if cookie_path.is_file():
+            options["cookiefile"] = str(cookie_path)
+        else:
+            logger.warning("Configured YOUTUBE_COOKIES_FILE does not exist: %s", cookie_path)
     with YoutubeDL(options) as downloader:
         info = downloader.extract_info(lookup, download=False)
 
