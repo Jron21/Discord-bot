@@ -57,6 +57,11 @@ def resolve_ffmpeg_path() -> str:
 
 FFMPEG_PATH = resolve_ffmpeg_path()
 MAX_SPOTIFY_PLAYLIST_TRACKS = 100
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -928,6 +933,10 @@ def resolve_music_track(url: str) -> MusicTrack:
         "no_warnings": True,
         "noplaylist": True,
         "format": "bestaudio/best",
+        "http_headers": {
+            "User-Agent": BROWSER_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+        },
     }
     with YoutubeDL(options) as downloader:
         info = downloader.extract_info(lookup, download=False)
@@ -986,7 +995,10 @@ async def start_next_music_track(guild_id: int) -> None:
         source = discord.FFmpegPCMAudio(
             track.stream_url,
             executable=FFMPEG_PATH,
-            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            before_options=(
+                "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+                f'-headers "User-Agent: {BROWSER_USER_AGENT}\\r\\n"'
+            ),
             options="-vn",
         )
 
