@@ -941,7 +941,7 @@ def resolve_music_track(url: str) -> MusicTrack:
 
     return MusicTrack(
         requested_url=url,
-        title=info.get("title") or url,
+        title=format_music_title(info, url),
         stream_url=info["url"],
     )
 
@@ -1050,6 +1050,32 @@ async def queue_music_track(
 def music_track_label(track: MusicTrack) -> str:
     """Return a user-facing title without the internal search prefix."""
     return re.sub(r"^ytsearch1:\s*", "", track.title).strip()
+
+
+def format_music_title(info: dict, fallback: str) -> str:
+    title = (info.get("title") or fallback).strip()
+    artist = info.get("artist") or info.get("uploader") or info.get("channel")
+    if isinstance(artist, str):
+        artist = artist.strip()
+    if artist and artist.casefold() not in title.casefold():
+        return f"{title} - {artist}"
+    return title
+
+
+def shuffle_music_queue(guild_id: int) -> int:
+    queue = music_queues.get(guild_id)
+    if not queue:
+        return 0
+    tracks = list(queue)
+    random.shuffle(tracks)
+    queue.clear()
+    queue.extend(tracks)
+    return len(tracks)
+
+
+def clear_music_queue(guild_id: int) -> int:
+    queue = music_queues.pop(guild_id, None)
+    return len(queue) if queue else 0
 
 
 def music_queue_lines(guild_id: int) -> list[str]:
@@ -1551,6 +1577,25 @@ async def skip(interaction: discord.Interaction):
     connection.stop()
 
 
+@bot.tree.command(name="next", description="Move to the next track")
+async def next_track(interaction: discord.Interaction):
+    await skip(interaction)
+
+
+@bot.tree.command(name="shuffle", description="Shuffle the queued tracks")
+async def shuffle(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used inside a server.", ephemeral=True
+        )
+        return
+    count = shuffle_music_queue(interaction.guild.id)
+    if count == 0:
+        await interaction.response.send_message("The queue is empty.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"Shuffled {count} queued tracks.")
+
+
 @bot.tree.command(
     name="loop",
     description="Loop the current track, the queue, or turn looping off",
@@ -1615,11 +1660,21 @@ async def queue(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
-    current = music_current.get(interaction.guild.id)
-    queued = music_queues.get(interaction.guild.id, deque())
-    lines = [f"Now playing: **{current.title}**"] if current else []
-    lines.extend(f"{index}. {track.title}" for index, track in enumerate(queued, 1))
+    lines = music_queue_lines(interaction.guild.id)
     await interaction.response.send_message("\n".join(lines) if lines else "The queue is empty.")
+
+
+@bot.tree.command(name="clear", description="Clear queued tracks without stopping the current song")
+async def clear(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used inside a server.", ephemeral=True
+        )
+        return
+    count = clear_music_queue(interaction.guild.id)
+    await interaction.response.send_message(
+        f"Cleared {count} queued track{'s' if count != 1 else ''}."
+    )
 
 
 @bot.tree.command(name="stop", description="Stop music and clear the queue")
@@ -1642,7 +1697,8 @@ async def local_s(ctx: commands.Context):
     """Run a slash command locally with the !s prefix."""
     await ctx.send(
         "Use `!s ping`, `!s test`, `!s play <url>`, `!s skip`, `!s pause`, "
-        "`!s resume`, `!s queue`, `!s loop <track|queue|off>`, `!s stop`, "
+        "`!s next`, `!s shuffle`, `!s resume`, `!s queue`, `!s clear`, "
+        "`!s loop <track|queue|off>`, `!s stop`, "
         "`!s join`, or `!s leave`."
     )
 
@@ -1725,6 +1781,28 @@ async def local_skip(ctx: commands.Context):
     await ctx.send("Skipped.")
 
 
+@local_s.command(name="next")
+async def local_next(ctx: commands.Context):
+    connection = ctx.guild.voice_client if ctx.guild else None
+    if connection is None or not connection.is_playing() and not connection.is_paused():
+        await ctx.send("Nothing is playing.")
+        return
+    connection.stop()
+    await ctx.send("Skipped.")
+
+
+@local_s.command(name="shuffle")
+async def local_shuffle(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+    count = shuffle_music_queue(ctx.guild.id)
+    if count == 0:
+        await ctx.send("The queue is empty.")
+        return
+    await ctx.send(f"Shuffled {count} queued tracks.")
+
+
 @local_s.command(name="loop")
 async def local_loop(ctx: commands.Context, mode: str):
     if ctx.guild is None:
@@ -1780,11 +1858,17 @@ async def local_queue(ctx: commands.Context):
     if ctx.guild is None:
         await ctx.send("This command can only be used inside a server.")
         return
-    current = music_current.get(ctx.guild.id)
-    queued = music_queues.get(ctx.guild.id, deque())
-    lines = [f"Now playing: **{current.title}**"] if current else []
-    lines.extend(f"{index}. {track.title}" for index, track in enumerate(queued, 1))
+    lines = music_queue_lines(ctx.guild.id)
     await ctx.send("\n".join(lines) if lines else "The queue is empty.")
+
+
+@local_s.command(name="clear")
+async def local_clear(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+    count = clear_music_queue(ctx.guild.id)
+    await ctx.send(f"Cleared {count} queued track{'s' if count != 1 else ''}.")
 
 
 @local_s.command(name="nowplaying")
