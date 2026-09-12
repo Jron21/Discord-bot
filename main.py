@@ -22,14 +22,12 @@ from yt_dlp import DownloadError, YoutubeDL
 
 load_dotenv()
 
-
 # ============================================================
 # Configuration
 # ============================================================
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
-
 
 def resolve_ffmpeg_path() -> str:
     configured_path = os.getenv("FFMPEG_PATH")
@@ -53,7 +51,6 @@ def resolve_ffmpeg_path() -> str:
         return str(windows_winget_ffmpeg)
 
     return "ffmpeg"
-
 
 FFMPEG_PATH = resolve_ffmpeg_path()
 MAX_SPOTIFY_PLAYLIST_TRACKS = 100
@@ -83,7 +80,6 @@ INSTAGRAM_POST_PATTERN = re.compile(
     r"instagram\.com/p/([^/?#]+)",
     re.IGNORECASE,
 )
-
 
 # ============================================================
 # Existing bot data
@@ -294,13 +290,11 @@ voice_reconnect_in_progress: set[int] = set()
 # Active reminder tasks.
 reminder_tasks: set[asyncio.Task] = set()
 
-
 @dataclass
 class MusicTrack:
     requested_url: str
     title: str
     stream_url: str
-
 
 # guild_id -> queued tracks and currently playing track
 music_queues: dict[int, deque[MusicTrack]] = {}
@@ -308,14 +302,11 @@ music_current: dict[int, MusicTrack] = {}
 music_text_channels: dict[int, discord.abc.Messageable] = {}
 music_loop_modes: dict[int, str] = {}
 
-
 def random_item(items):
     return random.choice(items)
 
-
 async def send_message(message: discord.Message, content: str) -> None:
     await message.channel.send(content)
-
 
 async def send_single_keyword_image(
     message: discord.Message,
@@ -335,7 +326,6 @@ async def send_single_keyword_image(
 
         await message.channel.send(file=discord.File(str(image_path)))
 
-
 class OpenGraphImageParser(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -349,7 +339,6 @@ class OpenGraphImageParser(HTMLParser):
         property_name = attributes.get("property") or attributes.get("name")
         if property_name in ("og:image", "twitter:image"):
             self.image_url = attributes.get("content")
-
 
 def download_image_url(
     image_url: str,
@@ -380,7 +369,6 @@ def download_image_url(
     temporary_path.replace(image_path)
     return image_path
 
-
 def download_open_graph_image(url: str, directory: str) -> Path | None:
     """Download an image exposed in a supported page's metadata."""
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -397,7 +385,6 @@ def download_open_graph_image(url: str, directory: str) -> Path | None:
 
     image_url = urljoin(url, parser.image_url)
     return download_image_url(image_url, directory, "open-graph-image")
-
 
 def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     """Download images from a TikTok photo post page."""
@@ -474,7 +461,6 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
 
     return paths
 
-
 def download_instagram_images(url: str, directory: str) -> list[Path]:
     """Download all images exposed by an Instagram carousel embed."""
     match = INSTAGRAM_POST_PATTERN.search(url)
@@ -540,7 +526,6 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
             paths.append(image_path)
 
     return paths
-
 
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
@@ -630,7 +615,6 @@ def download_social_media(url: str, directory: str) -> list[Path]:
 
     return [max(files, key=lambda path: path.stat().st_mtime)]
 
-
 def download_twitter_image(url: str, directory: str) -> Path | None:
     """Download the first public image exposed by a Twitter/X post."""
     match = TWITTER_TWEET_ID_PATTERN.search(url)
@@ -666,7 +650,6 @@ def download_twitter_image(url: str, directory: str) -> Path | None:
         directory,
         f"twitter-{tweet_id}",
     )
-
 
 async def extract_social_media(message: discord.Message, url: str) -> None:
     """Download and send a supported social-media link."""
@@ -723,7 +706,6 @@ async def extract_social_media(message: discord.Message, url: str) -> None:
                 mention_author=False,
             )
 
-
 async def find_social_media_url(message: discord.Message) -> str | None:
     """Find a supported URL in a message or the message it replies to."""
     match = SOCIAL_MEDIA_URL_PATTERN.search(message.content)
@@ -747,7 +729,6 @@ async def find_social_media_url(message: discord.Message) -> str | None:
 
     match = SOCIAL_MEDIA_URL_PATTERN.search(referenced_message.content)
     return match.group(0) if match else None
-
 
 # ============================================================
 # Voice connection handling
@@ -788,7 +769,6 @@ def schedule_voice_reconnect(guild_id: int, channel_id: int) -> None:
             schedule_voice_reconnect(guild_id, channel_id)
 
     voice_reconnect_tasks[guild_id] = asyncio.create_task(retry())
-
 
 async def reconnect_voice(guild_id: int, channel_id: int) -> None:
     if target_voice_channels.get(guild_id) != channel_id:
@@ -848,12 +828,10 @@ async def reconnect_voice(guild_id: int, channel_id: int) -> None:
             error,
         )
 
-
 MUSIC_URL_PATTERN = re.compile(
     r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|open\.spotify\.com)/",
     re.IGNORECASE,
 )
-
 
 def _spotify_track_title(url: str) -> str:
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -874,7 +852,6 @@ def _spotify_track_title(url: str) -> str:
     if title is None:
         raise ValueError("Spotify did not provide track metadata")
     return f"{title} {description or ''}".strip()
-
 
 def _spotify_playlist_queries(url: str) -> list[str]:
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -898,7 +875,6 @@ def _spotify_playlist_queries(url: str) -> list[str]:
         raise ValueError("Spotify did not provide any tracks for that playlist")
     return queries[:MAX_SPOTIFY_PLAYLIST_TRACKS]
 
-
 def resolve_music_requests(url: str) -> list[str]:
     url = url.strip()
     if MUSIC_URL_PATTERN.match(url) is None:
@@ -915,7 +891,6 @@ def resolve_music_requests(url: str) -> list[str]:
         raise ValueError("Use a Spotify track or playlist link")
     return [url]
 
-
 def resolve_music_track(url: str) -> MusicTrack:
     url = url.strip()
     if not url.startswith("ytsearch1:") and MUSIC_URL_PATTERN.match(url) is None:
@@ -928,7 +903,13 @@ def resolve_music_track(url: str) -> MusicTrack:
         "no_warnings": True,
         "noplaylist": True,
         "format": "bestaudio/best",
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        },
+        "socket_timeout": 30,
+        "retries": 5,
     }
+
     with YoutubeDL(options) as downloader:
         info = downloader.extract_info(lookup, download=False)
 
@@ -944,7 +925,6 @@ def resolve_music_track(url: str) -> MusicTrack:
         title=format_music_title(info, url),
         stream_url=info["url"],
     )
-
 
 async def ensure_music_voice(
     guild: discord.Guild,
@@ -964,7 +944,6 @@ async def ensure_music_voice(
     elif connection.channel is None or connection.channel.id != channel.id:
         await connection.move_to(channel)
     return connection
-
 
 async def start_next_music_track(guild_id: int) -> None:
     if guild_id in music_current:
@@ -1010,7 +989,6 @@ async def start_next_music_track(guild_id: int) -> None:
             await channel.send(f"I couldn't play that link: {clean_error}")
         await start_next_music_track(guild_id)
 
-
 async def finish_music_track(guild_id: int) -> None:
     track = music_current.pop(guild_id, None)
     loop_mode = music_loop_modes.get(guild_id)
@@ -1025,7 +1003,6 @@ async def finish_music_track(guild_id: int) -> None:
     elif track is not None and loop_mode == "queue":
         music_queues.setdefault(guild_id, deque()).append(track)
     await start_next_music_track(guild_id)
-
 
 async def queue_music_track(
     guild: discord.Guild,
@@ -1051,7 +1028,6 @@ def music_track_label(track: MusicTrack) -> str:
     """Return a user-facing title without the internal search prefix."""
     return re.sub(r"^ytsearch1:\s*", "", track.title).strip()
 
-
 def format_music_title(info: dict, fallback: str) -> str:
     title = (info.get("title") or fallback).strip()
     artist = info.get("artist") or info.get("uploader") or info.get("channel")
@@ -1060,7 +1036,6 @@ def format_music_title(info: dict, fallback: str) -> str:
     if artist and artist.casefold() not in title.casefold():
         return f"{title} - {artist}"
     return title
-
 
 def shuffle_music_queue(guild_id: int) -> int:
     queue = music_queues.get(guild_id)
@@ -1072,11 +1047,9 @@ def shuffle_music_queue(guild_id: int) -> int:
     queue.extend(tracks)
     return len(tracks)
 
-
 def clear_music_queue(guild_id: int) -> int:
     queue = music_queues.pop(guild_id, None)
     return len(queue) if queue else 0
-
 
 def music_queue_lines(guild_id: int) -> list[str]:
     current = music_current.get(guild_id)
@@ -1087,7 +1060,6 @@ def music_queue_lines(guild_id: int) -> list[str]:
         for index, track in enumerate(queued, 1)
     )
     return lines
-
 
 def parse_duration(value: str) -> int | None:
     """Convert values like '3days 2hours 1minute' to seconds."""
@@ -1113,7 +1085,6 @@ def parse_duration(value: str) -> int | None:
 
     return total_seconds if total_seconds > 0 else None
 
-
 # ============================================================
 # Bot events
 # ============================================================
@@ -1136,7 +1107,6 @@ async def on_ready():
     except Exception:
         logger.exception("Discord slash command registration failed")
 
-
 @bot.event
 async def on_voice_state_update(
     member: discord.Member,
@@ -1155,7 +1125,6 @@ async def on_voice_state_update(
 
     if after.channel is None or after.channel.id != channel_id:
         schedule_voice_reconnect(guild_id, channel_id)
-
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -1267,7 +1236,6 @@ async def on_message(message: discord.Message):
         elif message.channel.name == "bot" and command == "bye":
             await send_message(message, f"bye {username}")
 
-
 # ============================================================
 # Slash commands
 # ============================================================
@@ -1281,7 +1249,6 @@ async def ping(interaction: discord.Interaction):
         f"Pong! WebSocket latency: {round(bot.latency * 1000)}ms"
     )
 
-
 @bot.tree.command(
     name="test",
     description="Run a quick Sora10Chan test",
@@ -1291,7 +1258,6 @@ async def test(interaction: discord.Interaction):
         "Sora10Chan slash commands are working!"
     )
 
-
 @bot.tree.command(
     name="download",
     description="Download media from Facebook, TikTok, Instagram, or X",
@@ -1299,14 +1265,12 @@ async def test(interaction: discord.Interaction):
 async def download(interaction: discord.Interaction, url: str):
     await send_downloaded_media(interaction, url)
 
-
 @bot.tree.command(
     name="media",
     description="Extract an image, video, or carousel from a social link",
 )
 async def media(interaction: discord.Interaction, url: str):
     await send_downloaded_media(interaction, url)
-
 
 async def send_downloaded_media(
     interaction: discord.Interaction,
@@ -1366,7 +1330,6 @@ async def send_downloaded_media(
                 "Discord could not upload that media file."
             )
 
-
 @bot.tree.command(
     name="reminder",
     description="Remind you after a duration, such as 3d 2h 1m",
@@ -1411,7 +1374,6 @@ async def reminder(
 
     task = asyncio.create_task(deliver_reminder())
     reminder_tasks.add(task)
-
 
 @bot.tree.command(
     name="join",
@@ -1494,7 +1456,6 @@ async def join(interaction: discord.Interaction):
             "and that the channel is not full."
         )
 
-
 @bot.tree.command(
     name="leave",
     description="Leave the current voice channel",
@@ -1533,7 +1494,6 @@ async def leave(interaction: discord.Interaction):
     await connection.disconnect()
     await interaction.followup.send("Left the voice channel.")
 
-
 @bot.tree.command(
     name="play",
     description="Play or queue a YouTube or Spotify track or playlist",
@@ -1563,7 +1523,6 @@ async def play(interaction: discord.Interaction, url: str):
         return
     await interaction.followup.send(message)
 
-
 @bot.tree.command(name="skip", description="Skip the current track")
 async def skip(interaction: discord.Interaction):
     if interaction.guild is None or interaction.guild.voice_client is None:
@@ -1576,11 +1535,9 @@ async def skip(interaction: discord.Interaction):
     await interaction.response.send_message("Skipped.")
     connection.stop()
 
-
 @bot.tree.command(name="next", description="Move to the next track")
 async def next_track(interaction: discord.Interaction):
     await skip(interaction)
-
 
 @bot.tree.command(name="shuffle", description="Shuffle the queued tracks")
 async def shuffle(interaction: discord.Interaction):
@@ -1594,7 +1551,6 @@ async def shuffle(interaction: discord.Interaction):
         await interaction.response.send_message("The queue is empty.", ephemeral=True)
         return
     await interaction.response.send_message(f"Shuffled {count} queued tracks.")
-
 
 @bot.tree.command(
     name="loop",
@@ -1634,7 +1590,6 @@ async def loop(interaction: discord.Interaction, mode: str):
     label = "current track" if mode == "track" else "queue"
     await interaction.response.send_message(f"Looping {label}.")
 
-
 @bot.tree.command(name="pause", description="Pause the current track")
 async def pause(interaction: discord.Interaction):
     connection = interaction.guild.voice_client if interaction.guild else None
@@ -1643,7 +1598,6 @@ async def pause(interaction: discord.Interaction):
         return
     connection.pause()
     await interaction.response.send_message("Paused.")
-
 
 @bot.tree.command(name="resume", description="Resume the paused track")
 async def resume(interaction: discord.Interaction):
@@ -1654,7 +1608,6 @@ async def resume(interaction: discord.Interaction):
     connection.resume()
     await interaction.response.send_message("Resumed.")
 
-
 @bot.tree.command(name="queue", description="Show the current music queue")
 async def queue(interaction: discord.Interaction):
     if interaction.guild is None:
@@ -1662,7 +1615,6 @@ async def queue(interaction: discord.Interaction):
         return
     lines = music_queue_lines(interaction.guild.id)
     await interaction.response.send_message("\n".join(lines) if lines else "The queue is empty.")
-
 
 @bot.tree.command(name="clear", description="Clear queued tracks without stopping the current song")
 async def clear(interaction: discord.Interaction):
@@ -1675,7 +1627,6 @@ async def clear(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"Cleared {count} queued track{'s' if count != 1 else ''}."
     )
-
 
 @bot.tree.command(name="stop", description="Stop music and clear the queue")
 async def stop(interaction: discord.Interaction):
@@ -1691,7 +1642,6 @@ async def stop(interaction: discord.Interaction):
         connection.stop()
     await interaction.response.send_message("Stopped and cleared the queue.")
 
-
 @bot.group(name="s", invoke_without_command=True)
 async def local_s(ctx: commands.Context):
     """Run a slash command locally with the !s prefix."""
@@ -1702,16 +1652,13 @@ async def local_s(ctx: commands.Context):
         "`!s join`, or `!s leave`."
     )
 
-
 @local_s.command(name="ping")
 async def local_ping(ctx: commands.Context):
     await ctx.send(f"Pong! WebSocket latency: {round(bot.latency * 1000)}ms")
 
-
 @local_s.command(name="test")
 async def local_test(ctx: commands.Context):
     await ctx.send("Sora10Chan local commands are working!")
-
 
 async def send_local_media(ctx: commands.Context, url: str) -> None:
     url_match = SOCIAL_MEDIA_URL_PATTERN.fullmatch(url.strip())
@@ -1720,16 +1667,13 @@ async def send_local_media(ctx: commands.Context, url: str) -> None:
         return
     await extract_social_media(ctx.message, url_match.group(0))
 
-
 @local_s.command(name="download")
 async def local_download(ctx: commands.Context, url: str):
     await send_local_media(ctx, url)
 
-
 @local_s.command(name="media")
 async def local_media(ctx: commands.Context, url: str):
     await send_local_media(ctx, url)
-
 
 @local_s.command(name="reminder")
 async def local_reminder(ctx: commands.Context, duration: str, *, text: str):
@@ -1754,7 +1698,6 @@ async def local_reminder(ctx: commands.Context, duration: str, *, text: str):
     task = asyncio.create_task(deliver_local_reminder())
     reminder_tasks.add(task)
 
-
 @local_s.command(name="play")
 async def local_play(ctx: commands.Context, url: str):
     if ctx.guild is None or not isinstance(ctx.author, discord.Member):
@@ -1770,7 +1713,6 @@ async def local_play(ctx: commands.Context, url: str):
         return
     await ctx.send(message)
 
-
 @local_s.command(name="skip")
 async def local_skip(ctx: commands.Context):
     connection = ctx.guild.voice_client if ctx.guild else None
@@ -1780,7 +1722,6 @@ async def local_skip(ctx: commands.Context):
     connection.stop()
     await ctx.send("Skipped.")
 
-
 @local_s.command(name="next")
 async def local_next(ctx: commands.Context):
     connection = ctx.guild.voice_client if ctx.guild else None
@@ -1789,7 +1730,6 @@ async def local_next(ctx: commands.Context):
         return
     connection.stop()
     await ctx.send("Skipped.")
-
 
 @local_s.command(name="shuffle")
 async def local_shuffle(ctx: commands.Context):
@@ -1801,7 +1741,6 @@ async def local_shuffle(ctx: commands.Context):
         await ctx.send("The queue is empty.")
         return
     await ctx.send(f"Shuffled {count} queued tracks.")
-
 
 @local_s.command(name="loop")
 async def local_loop(ctx: commands.Context, mode: str):
@@ -1832,7 +1771,6 @@ async def local_loop(ctx: commands.Context, mode: str):
     label = "current track" if mode == "track" else "queue"
     await ctx.send(f"Looping {label}.")
 
-
 @local_s.command(name="pause")
 async def local_pause(ctx: commands.Context):
     connection = ctx.guild.voice_client if ctx.guild else None
@@ -1841,7 +1779,6 @@ async def local_pause(ctx: commands.Context):
         return
     connection.pause()
     await ctx.send("Paused.")
-
 
 @local_s.command(name="resume")
 async def local_resume(ctx: commands.Context):
@@ -1852,7 +1789,6 @@ async def local_resume(ctx: commands.Context):
     connection.resume()
     await ctx.send("Resumed.")
 
-
 @local_s.command(name="queue")
 async def local_queue(ctx: commands.Context):
     if ctx.guild is None:
@@ -1861,7 +1797,6 @@ async def local_queue(ctx: commands.Context):
     lines = music_queue_lines(ctx.guild.id)
     await ctx.send("\n".join(lines) if lines else "The queue is empty.")
 
-
 @local_s.command(name="clear")
 async def local_clear(ctx: commands.Context):
     if ctx.guild is None:
@@ -1869,7 +1804,6 @@ async def local_clear(ctx: commands.Context):
         return
     count = clear_music_queue(ctx.guild.id)
     await ctx.send(f"Cleared {count} queued track{'s' if count != 1 else ''}.")
-
 
 @local_s.command(name="nowplaying")
 async def local_nowplaying(ctx: commands.Context):
@@ -1881,7 +1815,6 @@ async def local_nowplaying(ctx: commands.Context):
         await ctx.send("Nothing is playing.")
         return
     await ctx.send(f"Now playing: **{music_track_label(current)}**")
-
 
 @local_s.command(name="stop")
 async def local_stop(ctx: commands.Context):
@@ -1896,7 +1829,6 @@ async def local_stop(ctx: commands.Context):
     if connection is not None and (connection.is_playing() or connection.is_paused()):
         connection.stop()
     await ctx.send("Stopped and cleared the queue.")
-
 
 @local_s.command(name="join")
 async def local_join(ctx: commands.Context):
@@ -1922,7 +1854,6 @@ async def local_join(ctx: commands.Context):
         logger.exception("Could not join voice channel from local command")
         await ctx.send("I couldn't connect to that voice channel.")
 
-
 @local_s.command(name="leave")
 async def local_leave(ctx: commands.Context):
     if ctx.guild is None:
@@ -1947,7 +1878,6 @@ async def local_leave(ctx: commands.Context):
         connection.stop()
     await connection.disconnect()
     await ctx.send("Left the voice channel.")
-
 
 # ============================================================
 # Start
