@@ -29,7 +29,33 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
+
+
+def resolve_ffmpeg_path() -> str:
+    configured_path = os.getenv("FFMPEG_PATH")
+    if configured_path:
+        configured_candidate = Path(configured_path).expanduser()
+        if configured_candidate.is_file():
+            return str(configured_candidate)
+        configured_command = shutil.which(configured_path)
+        if configured_command:
+            return configured_command
+
+    path_ffmpeg = shutil.which("ffmpeg")
+    if path_ffmpeg:
+        return path_ffmpeg
+
+    windows_winget_ffmpeg = (
+        Path.home() / "AppData" / "Local" / "Microsoft" / "WinGet"
+        / "Links" / "ffmpeg.exe"
+    )
+    if windows_winget_ffmpeg.is_file():
+        return str(windows_winget_ffmpeg)
+
+    return "ffmpeg"
+
+
+FFMPEG_PATH = resolve_ffmpeg_path()
 MAX_SPOTIFY_PLAYLIST_TRACKS = 100
 
 logging.basicConfig(
