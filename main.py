@@ -3,6 +3,8 @@ import random
 import asyncio
 import json
 import logging
+from collections import deque
+from dataclasses import dataclass
 from html import unescape
 from pathlib import Path
 import re
@@ -27,6 +29,8 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
+MAX_SPOTIFY_PLAYLIST_TRACKS = 100
 
 logging.basicConfig(
     level=logging.INFO,
@@ -258,8 +262,25 @@ target_voice_channels: dict[int, int] = {}
 # guild_id -> asyncio.Task
 voice_reconnect_tasks: dict[int, asyncio.Task] = {}
 
+# Guilds currently inside a disconnect/connect recovery transition.
+voice_reconnect_in_progress: set[int] = set()
+
 # Active reminder tasks.
 reminder_tasks: set[asyncio.Task] = set()
+
+
+@dataclass
+class MusicTrack:
+    requested_url: str
+    title: str
+    stream_url: str
+
+
+# guild_id -> queued tracks and currently playing track
+music_queues: dict[int, deque[MusicTrack]] = {}
+music_current: dict[int, MusicTrack] = {}
+music_text_channels: dict[int, discord.abc.Messageable] = {}
+music_loop_modes: dict[int, str] = {}
 
 
 def random_item(items):
@@ -498,6 +519,7 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
+    is_instagram_post = INSTAGRAM_POST_PATTERN.search(url) is not None
 
     if is_twitter_status:
         twitter_image = download_twitter_image(url, directory)
@@ -505,7 +527,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             return [twitter_image]
 
     options = {
-        "noplaylist": True,
+        "noplaylist": not is_instagram_post,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
         "quiet": True,
@@ -576,6 +598,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     files = [path for path in Path(directory).iterdir() if path.is_file()]
     if not files:
         raise DownloadError("No media file was downloaded")
+
+    if is_instagram_post:
+        return sorted(files, key=lambda path: path.stat().st_mtime)
 
     return [max(files, key=lambda path: path.stat().st_mtime)]
 
@@ -706,6 +731,8 @@ def schedule_voice_reconnect(guild_id: int, channel_id: int) -> None:
     """Schedule one reconnect attempt after five seconds."""
     if target_voice_channels.get(guild_id) != channel_id:
         return
+    if guild_id in voice_reconnect_in_progress:
+        return
 
     existing = voice_reconnect_tasks.get(guild_id)
     if existing is not None and not existing.done():
@@ -714,17 +741,24 @@ def schedule_voice_reconnect(guild_id: int, channel_id: int) -> None:
     async def retry() -> None:
         try:
             await asyncio.sleep(5)
-            voice_reconnect_tasks.pop(guild_id, None)
+            voice_reconnect_in_progress.add(guild_id)
             await reconnect_voice(guild_id, channel_id)
         except asyncio.CancelledError:
-            voice_reconnect_tasks.pop(guild_id, None)
             raise
         except Exception as error:
-            voice_reconnect_tasks.pop(guild_id, None)
             logger.warning(
                 "Sora10Chan voice reconnect attempt encountered an error: %s",
                 error,
             )
+        finally:
+            voice_reconnect_in_progress.discard(guild_id)
+            voice_reconnect_tasks.pop(guild_id, None)
+
+        guild = bot.get_guild(guild_id)
+        connection = guild.voice_client if guild is not None else None
+        if target_voice_channels.get(guild_id) == channel_id and (
+            connection is None or not connection.is_connected()
+        ):
             schedule_voice_reconnect(guild_id, channel_id)
 
     voice_reconnect_tasks[guild_id] = asyncio.create_task(retry())
@@ -787,7 +821,220 @@ async def reconnect_voice(guild_id: int, channel_id: int) -> None:
             channel_id,
             error,
         )
-        schedule_voice_reconnect(guild_id, channel_id)
+
+
+MUSIC_URL_PATTERN = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|open\.spotify\.com)/",
+    re.IGNORECASE,
+)
+
+
+def _spotify_track_title(url: str) -> str:
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=20) as response:
+        page = response.read().decode("utf-8", errors="replace")
+
+    def meta_content(property_name: str) -> str | None:
+        tag_match = re.search(
+            rf"<meta\b(?=[^>]*\bproperty=[\"']{property_name}[\"'])"
+            rf"(?=[^>]*\bcontent=[\"']([^\"']+))[^>]*>",
+            page,
+            re.IGNORECASE,
+        )
+        return unescape(tag_match.group(1)).strip() if tag_match else None
+
+    title = meta_content("og:title")
+    description = meta_content("og:description")
+    if title is None:
+        raise ValueError("Spotify did not provide track metadata")
+    return f"{title} {description or ''}".strip()
+
+
+def _spotify_playlist_queries(url: str) -> list[str]:
+    request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urlopen(request, timeout=20) as response:
+        page = response.read().decode("utf-8", errors="replace")
+
+    row_pattern = re.compile(
+        r'href="/track/[A-Za-z0-9]+"><p[^>]*data-encore-id="listRowTitle"'
+        r'[^>]*>.*?<span[^>]*>(.*?)</span></p></a>.*?'
+        r'data-testid="internal-artist-link".*?<a[^>]*>(.*?)</a>',
+        re.IGNORECASE | re.DOTALL,
+    )
+    queries = []
+    for title, artist in row_pattern.findall(page):
+        title = re.sub(r"<[^>]+>", "", unescape(title)).strip()
+        artist = re.sub(r"<[^>]+>", "", unescape(artist)).strip()
+        if title:
+            queries.append(f"{title} {artist}".strip())
+
+    if not queries:
+        raise ValueError("Spotify did not provide any tracks for that playlist")
+    return queries[:MAX_SPOTIFY_PLAYLIST_TRACKS]
+
+
+def resolve_music_requests(url: str) -> list[str]:
+    url = url.strip()
+    if MUSIC_URL_PATTERN.match(url) is None:
+        raise ValueError("Only YouTube and Spotify links are supported")
+
+    parsed_url = urlparse(url)
+    hostname = (parsed_url.hostname or "").lower()
+    if hostname == "open.spotify.com":
+        path = parsed_url.path.lower()
+        if path.startswith("/track/"):
+            return [f"ytsearch1:{_spotify_track_title(url)}"]
+        if path.startswith("/playlist/"):
+            return [f"ytsearch1:{query}" for query in _spotify_playlist_queries(url)]
+        raise ValueError("Use a Spotify track or playlist link")
+    return [url]
+
+
+def resolve_music_track(url: str) -> MusicTrack:
+    url = url.strip()
+    if not url.startswith("ytsearch1:") and MUSIC_URL_PATTERN.match(url) is None:
+        raise ValueError("Only YouTube and Spotify links are supported")
+
+    lookup = url
+
+    options = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "bestaudio/best",
+    }
+    with YoutubeDL(options) as downloader:
+        info = downloader.extract_info(lookup, download=False)
+
+    if info is None:
+        raise ValueError("No playable result was found")
+    if "entries" in info:
+        info = next((entry for entry in info["entries"] if entry), None)
+    if info is None or not info.get("url"):
+        raise ValueError("No playable audio stream was found")
+
+    return MusicTrack(
+        requested_url=url,
+        title=info.get("title") or url,
+        stream_url=info["url"],
+    )
+
+
+async def ensure_music_voice(
+    guild: discord.Guild,
+    member: discord.Member,
+) -> discord.VoiceClient:
+    if member.voice is None or member.voice.channel is None:
+        raise ValueError("Join a voice channel first")
+
+    channel = member.voice.channel
+    if not isinstance(channel, (discord.VoiceChannel, discord.StageChannel)):
+        raise ValueError("That is not a voice channel")
+
+    connection = guild.voice_client
+    target_voice_channels[guild.id] = channel.id
+    if connection is None:
+        connection = await channel.connect(self_deaf=True)
+    elif connection.channel is None or connection.channel.id != channel.id:
+        await connection.move_to(channel)
+    return connection
+
+
+async def start_next_music_track(guild_id: int) -> None:
+    if guild_id in music_current:
+        return
+
+    queue = music_queues.get(guild_id)
+    guild = bot.get_guild(guild_id)
+    connection = guild.voice_client if guild is not None else None
+    if not queue or guild is None or connection is None or not connection.is_connected():
+        if queue is not None and not queue:
+            music_queues.pop(guild_id, None)
+        return
+
+    track = queue.popleft()
+    music_current[guild_id] = track
+    try:
+        track = await asyncio.to_thread(resolve_music_track, track.requested_url)
+        music_current[guild_id] = track
+        source = discord.FFmpegPCMAudio(
+            track.stream_url,
+            executable=FFMPEG_PATH,
+            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+            options="-vn",
+        )
+
+        def after_playback(error: Exception | None) -> None:
+            if error:
+                logger.warning("Music playback failed in guild %s: %s", guild_id, error)
+            bot.loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(finish_music_track(guild_id))
+            )
+
+        connection.play(source, after=after_playback)
+        channel = music_text_channels.get(guild_id)
+        if channel is not None:
+            await channel.send(f"Now playing: **{track.title}**")
+    except Exception as error:
+        music_current.pop(guild_id, None)
+        logger.warning("Could not start music in guild %s: %s", guild_id, error)
+        channel = music_text_channels.get(guild_id)
+        if channel is not None:
+            clean_error = re.sub(r"\x1b\[[0-9;]*m", "", str(error)).strip()
+            await channel.send(f"I couldn't play that link: {clean_error}")
+        await start_next_music_track(guild_id)
+
+
+async def finish_music_track(guild_id: int) -> None:
+    track = music_current.pop(guild_id, None)
+    loop_mode = music_loop_modes.get(guild_id)
+    if track is not None and loop_mode == "track":
+        music_queues.setdefault(guild_id, deque()).appendleft(
+            MusicTrack(
+                requested_url=track.requested_url,
+                title=track.title,
+                stream_url="",
+            )
+        )
+    elif track is not None and loop_mode == "queue":
+        music_queues.setdefault(guild_id, deque()).append(track)
+    await start_next_music_track(guild_id)
+
+
+async def queue_music_track(
+    guild: discord.Guild,
+    member: discord.Member,
+    channel: discord.abc.Messageable,
+    url: str,
+) -> str:
+    await ensure_music_voice(guild, member)
+    music_text_channels[guild.id] = channel
+    requests = await asyncio.to_thread(resolve_music_requests, url)
+    queue = music_queues.setdefault(guild.id, deque())
+    start_position = len(queue) + (1 if guild.id in music_current else 0) + 1
+    queue.extend(
+        MusicTrack(requested_url=request, title=request, stream_url="")
+        for request in requests
+    )
+    await start_next_music_track(guild.id)
+    if len(requests) == 1:
+        return f"Queued at position {start_position}."
+    return f"Queued {len(requests)} tracks starting at position {start_position}."
+
+def music_track_label(track: MusicTrack) -> str:
+    """Return a user-facing title without the internal search prefix."""
+    return re.sub(r"^ytsearch1:\s*", "", track.title).strip()
+
+
+def music_queue_lines(guild_id: int) -> list[str]:
+    current = music_current.get(guild_id)
+    queued = music_queues.get(guild_id, deque())
+    lines = [f"Now playing: **{music_track_label(current)}**"] if current else []
+    lines.extend(
+        f"{index}. {music_track_label(track)}"
+        for index, track in enumerate(queued, 1)
+    )
+    return lines
 
 
 def parse_duration(value: str) -> int | None:
@@ -1212,6 +1459,10 @@ async def leave(interaction: discord.Interaction):
     guild_id = interaction.guild.id
 
     target_voice_channels.pop(guild_id, None)
+    music_queues.pop(guild_id, None)
+    music_current.pop(guild_id, None)
+    music_text_channels.pop(guild_id, None)
+    music_loop_modes.pop(guild_id, None)
 
     task = voice_reconnect_tasks.pop(guild_id, None)
     if task is not None and not task.done():
@@ -1225,16 +1476,148 @@ async def leave(interaction: discord.Interaction):
         )
         return
 
+    if connection.is_playing() or connection.is_paused():
+        connection.stop()
     await connection.disconnect()
     await interaction.followup.send("Left the voice channel.")
+
+
+@bot.tree.command(
+    name="play",
+    description="Play or queue a YouTube or Spotify track or playlist",
+)
+async def play(interaction: discord.Interaction, url: str):
+    if interaction.guild is None or not isinstance(interaction.user, discord.Member):
+        await interaction.response.send_message(
+            "This command can only be used inside a server.", ephemeral=True
+        )
+        return
+    if MUSIC_URL_PATTERN.match(url.strip()) is None:
+        await interaction.response.send_message(
+            "Use a YouTube or Spotify track or playlist link.", ephemeral=True
+        )
+        return
+
+    await interaction.response.defer()
+    try:
+        message = await queue_music_track(
+            interaction.guild,
+            interaction.user,
+            interaction.channel or interaction.guild,
+            url,
+        )
+    except (ValueError, discord.DiscordException) as error:
+        await interaction.followup.send(str(error))
+        return
+    await interaction.followup.send(message)
+
+
+@bot.tree.command(name="skip", description="Skip the current track")
+async def skip(interaction: discord.Interaction):
+    if interaction.guild is None or interaction.guild.voice_client is None:
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+    connection = interaction.guild.voice_client
+    if not connection.is_playing() and not connection.is_paused():
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+    await interaction.response.send_message("Skipped.")
+    connection.stop()
+
+
+@bot.tree.command(
+    name="loop",
+    description="Loop the current track, the queue, or turn looping off",
+)
+async def loop(interaction: discord.Interaction, mode: str):
+    if interaction.guild is None:
+        await interaction.response.send_message(
+            "This command can only be used inside a server.", ephemeral=True
+        )
+        return
+
+    mode = mode.lower().strip()
+    if mode not in ("track", "queue", "off"):
+        await interaction.response.send_message(
+            "Choose `track`, `queue`, or `off`.", ephemeral=True
+        )
+        return
+
+    guild_id = interaction.guild.id
+    if mode == "off":
+        music_loop_modes.pop(guild_id, None)
+        await interaction.response.send_message("Looping disabled.")
+        return
+
+    if (
+        interaction.guild.voice_client is None
+        or guild_id not in music_current
+        and not music_queues.get(guild_id)
+    ):
+        await interaction.response.send_message(
+            "There is no track or playlist to loop.", ephemeral=True
+        )
+        return
+
+    music_loop_modes[guild_id] = mode
+    label = "current track" if mode == "track" else "queue"
+    await interaction.response.send_message(f"Looping {label}.")
+
+
+@bot.tree.command(name="pause", description="Pause the current track")
+async def pause(interaction: discord.Interaction):
+    connection = interaction.guild.voice_client if interaction.guild else None
+    if connection is None or not connection.is_playing():
+        await interaction.response.send_message("Nothing is playing.", ephemeral=True)
+        return
+    connection.pause()
+    await interaction.response.send_message("Paused.")
+
+
+@bot.tree.command(name="resume", description="Resume the paused track")
+async def resume(interaction: discord.Interaction):
+    connection = interaction.guild.voice_client if interaction.guild else None
+    if connection is None or not connection.is_paused():
+        await interaction.response.send_message("Nothing is paused.", ephemeral=True)
+        return
+    connection.resume()
+    await interaction.response.send_message("Resumed.")
+
+
+@bot.tree.command(name="queue", description="Show the current music queue")
+async def queue(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+    current = music_current.get(interaction.guild.id)
+    queued = music_queues.get(interaction.guild.id, deque())
+    lines = [f"Now playing: **{current.title}**"] if current else []
+    lines.extend(f"{index}. {track.title}" for index, track in enumerate(queued, 1))
+    await interaction.response.send_message("\n".join(lines) if lines else "The queue is empty.")
+
+
+@bot.tree.command(name="stop", description="Stop music and clear the queue")
+async def stop(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
+        return
+    guild_id = interaction.guild.id
+    music_queues.pop(guild_id, None)
+    music_current.pop(guild_id, None)
+    music_loop_modes.pop(guild_id, None)
+    connection = interaction.guild.voice_client
+    if connection is not None and (connection.is_playing() or connection.is_paused()):
+        connection.stop()
+    await interaction.response.send_message("Stopped and cleared the queue.")
 
 
 @bot.group(name="s", invoke_without_command=True)
 async def local_s(ctx: commands.Context):
     """Run a slash command locally with the !s prefix."""
     await ctx.send(
-        "Use `!s ping`, `!s test`, `!s download <url>`, `!s media <url>`, "
-        "`!s reminder <duration> <text>`, `!s join`, or `!s leave`."
+        "Use `!s ping`, `!s test`, `!s play <url>`, `!s skip`, `!s pause`, "
+        "`!s resume`, `!s queue`, `!s loop <track|queue|off>`, `!s stop`, "
+        "`!s join`, or `!s leave`."
     )
 
 
@@ -1290,6 +1673,121 @@ async def local_reminder(ctx: commands.Context, duration: str, *, text: str):
     reminder_tasks.add(task)
 
 
+@local_s.command(name="play")
+async def local_play(ctx: commands.Context, url: str):
+    if ctx.guild is None or not isinstance(ctx.author, discord.Member):
+        await ctx.send("This command can only be used inside a server.")
+        return
+    if MUSIC_URL_PATTERN.match(url.strip()) is None:
+        await ctx.send("Use a YouTube or Spotify track or playlist link.")
+        return
+    try:
+        message = await queue_music_track(ctx.guild, ctx.author, ctx.channel, url)
+    except (ValueError, discord.DiscordException) as error:
+        await ctx.send(str(error))
+        return
+    await ctx.send(message)
+
+
+@local_s.command(name="skip")
+async def local_skip(ctx: commands.Context):
+    connection = ctx.guild.voice_client if ctx.guild else None
+    if connection is None or not connection.is_playing() and not connection.is_paused():
+        await ctx.send("Nothing is playing.")
+        return
+    connection.stop()
+    await ctx.send("Skipped.")
+
+
+@local_s.command(name="loop")
+async def local_loop(ctx: commands.Context, mode: str):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+
+    mode = mode.lower().strip()
+    if mode not in ("track", "queue", "off"):
+        await ctx.send("Choose `track`, `queue`, or `off`.")
+        return
+
+    guild_id = ctx.guild.id
+    if mode == "off":
+        music_loop_modes.pop(guild_id, None)
+        await ctx.send("Looping disabled.")
+        return
+
+    if (
+        ctx.guild.voice_client is None
+        or guild_id not in music_current
+        and not music_queues.get(guild_id)
+    ):
+        await ctx.send("There is no track or playlist to loop.")
+        return
+
+    music_loop_modes[guild_id] = mode
+    label = "current track" if mode == "track" else "queue"
+    await ctx.send(f"Looping {label}.")
+
+
+@local_s.command(name="pause")
+async def local_pause(ctx: commands.Context):
+    connection = ctx.guild.voice_client if ctx.guild else None
+    if connection is None or not connection.is_playing():
+        await ctx.send("Nothing is playing.")
+        return
+    connection.pause()
+    await ctx.send("Paused.")
+
+
+@local_s.command(name="resume")
+async def local_resume(ctx: commands.Context):
+    connection = ctx.guild.voice_client if ctx.guild else None
+    if connection is None or not connection.is_paused():
+        await ctx.send("Nothing is paused.")
+        return
+    connection.resume()
+    await ctx.send("Resumed.")
+
+
+@local_s.command(name="queue")
+async def local_queue(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+    current = music_current.get(ctx.guild.id)
+    queued = music_queues.get(ctx.guild.id, deque())
+    lines = [f"Now playing: **{current.title}**"] if current else []
+    lines.extend(f"{index}. {track.title}" for index, track in enumerate(queued, 1))
+    await ctx.send("\n".join(lines) if lines else "The queue is empty.")
+
+
+@local_s.command(name="nowplaying")
+async def local_nowplaying(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+    current = music_current.get(ctx.guild.id)
+    if current is None:
+        await ctx.send("Nothing is playing.")
+        return
+    await ctx.send(f"Now playing: **{music_track_label(current)}**")
+
+
+@local_s.command(name="stop")
+async def local_stop(ctx: commands.Context):
+    if ctx.guild is None:
+        await ctx.send("This command can only be used inside a server.")
+        return
+    guild_id = ctx.guild.id
+    music_queues.pop(guild_id, None)
+    music_current.pop(guild_id, None)
+    music_loop_modes.pop(guild_id, None)
+    connection = ctx.guild.voice_client
+    if connection is not None and (connection.is_playing() or connection.is_paused()):
+        connection.stop()
+    await ctx.send("Stopped and cleared the queue.")
+
+
 @local_s.command(name="join")
 async def local_join(ctx: commands.Context):
     if ctx.guild is None or ctx.author.voice is None or ctx.author.voice.channel is None:
@@ -1322,6 +1820,10 @@ async def local_leave(ctx: commands.Context):
         return
 
     target_voice_channels.pop(ctx.guild.id, None)
+    music_queues.pop(ctx.guild.id, None)
+    music_current.pop(ctx.guild.id, None)
+    music_text_channels.pop(ctx.guild.id, None)
+    music_loop_modes.pop(ctx.guild.id, None)
     task = voice_reconnect_tasks.pop(ctx.guild.id, None)
     if task is not None and not task.done():
         task.cancel()
@@ -1331,6 +1833,8 @@ async def local_leave(ctx: commands.Context):
         await ctx.send("I am not currently in a voice channel.")
         return
 
+    if connection.is_playing() or connection.is_paused():
+        connection.stop()
     await connection.disconnect()
     await ctx.send("Left the voice channel.")
 
