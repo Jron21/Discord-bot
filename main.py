@@ -1012,7 +1012,7 @@ async def start_next_music_track(guild_id: int) -> None:
         connection.play(source, after=after_playback)
         channel = music_text_channels.get(guild_id)
         if channel is not None:
-            await channel.send(f"Now playing: **{track.title}**")
+            await channel.send(embed=music_now_playing_embed(track))
     except Exception as error:
         music_current.pop(guild_id, None)
         logger.warning("Could not start music in guild %s: %s", guild_id, error)
@@ -1088,6 +1088,40 @@ def shuffle_music_queue(guild_id: int) -> int:
 def clear_music_queue(guild_id: int) -> int:
     queue = music_queues.pop(guild_id, None)
     return len(queue) if queue else 0
+
+
+def music_now_playing_embed(track: MusicTrack) -> discord.Embed:
+    return discord.Embed(
+        title="Now playing",
+        description=f"**{music_track_label(track)}**",
+        color=discord.Color.green(),
+    )
+
+
+def music_queue_embed(guild_id: int) -> discord.Embed:
+    embed = discord.Embed(title="Music queue", color=discord.Color.blurple())
+    current = music_current.get(guild_id)
+    queued = music_queues.get(guild_id, deque())
+    if current:
+        embed.add_field(
+            name="Now playing",
+            value=music_track_label(current),
+            inline=False,
+        )
+    queued_tracks = list(queued)
+    for chunk_start in range(0, len(queued_tracks), 15):
+        chunk = queued_tracks[chunk_start:chunk_start + 15]
+        embed.add_field(
+            name="Up next" if chunk_start == 0 else "Up next (continued)",
+            value="\n".join(
+                f"`{chunk_start + index}` {music_track_label(track)}"
+                for index, track in enumerate(chunk, 1)
+            ),
+            inline=False,
+        )
+    if not current and not queued_tracks:
+        embed.description = "The queue is empty."
+    return embed
 
 
 def music_queue_lines(guild_id: int) -> list[str]:
@@ -1672,8 +1706,7 @@ async def queue(interaction: discord.Interaction):
     if interaction.guild is None:
         await interaction.response.send_message("This command can only be used inside a server.", ephemeral=True)
         return
-    lines = music_queue_lines(interaction.guild.id)
-    await interaction.response.send_message("\n".join(lines) if lines else "The queue is empty.")
+    await interaction.response.send_message(embed=music_queue_embed(interaction.guild.id))
 
 
 @bot.tree.command(name="clear", description="Clear queued tracks without stopping the current song")
@@ -1870,8 +1903,7 @@ async def local_queue(ctx: commands.Context):
     if ctx.guild is None:
         await ctx.send("This command can only be used inside a server.")
         return
-    lines = music_queue_lines(ctx.guild.id)
-    await ctx.send("\n".join(lines) if lines else "The queue is empty.")
+    await ctx.send(embed=music_queue_embed(ctx.guild.id))
 
 
 @local_s.command(name="clear")
@@ -1892,7 +1924,7 @@ async def local_nowplaying(ctx: commands.Context):
     if current is None:
         await ctx.send("Nothing is playing.")
         return
-    await ctx.send(f"Now playing: **{music_track_label(current)}**")
+    await ctx.send(embed=music_now_playing_embed(current))
 
 
 @local_s.command(name="stop")
