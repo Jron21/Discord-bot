@@ -908,7 +908,9 @@ def _spotify_playlist_queries(url: str) -> list[str]:
 def resolve_music_requests(url: str) -> list[str]:
     url = url.strip()
     if MUSIC_URL_PATTERN.match(url) is None:
-        raise ValueError("Only YouTube and Spotify links are supported")
+        if not url:
+            raise ValueError("Enter a song title or a YouTube/Spotify link")
+        return [f"ytsearch1:{url}"]
 
     parsed_url = urlparse(url)
     hostname = (parsed_url.hostname or "").lower()
@@ -1593,7 +1595,7 @@ async def leave(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="play",
-    description="Play or queue a YouTube or Spotify track or playlist",
+    description="Play or queue a song title, YouTube link, or Spotify track/playlist",
 )
 async def play(interaction: discord.Interaction, url: str):
     if interaction.guild is None or not isinstance(interaction.user, discord.Member):
@@ -1601,12 +1603,6 @@ async def play(interaction: discord.Interaction, url: str):
             "This command can only be used inside a server.", ephemeral=True
         )
         return
-    if MUSIC_URL_PATTERN.match(url.strip()) is None:
-        await interaction.response.send_message(
-            "Use a YouTube or Spotify track or playlist link.", ephemeral=True
-        )
-        return
-
     await interaction.response.defer()
     try:
         message = await queue_music_track(
@@ -1752,7 +1748,7 @@ async def stop(interaction: discord.Interaction):
 async def local_s(ctx: commands.Context):
     """Run a slash command locally with the !s prefix."""
     await ctx.send(
-        "Use `!s ping`, `!s test`, `!s play <url>`, `!s skip`, `!s pause`, "
+        "Use `!s ping`, `!s test`, `!s play <song title or url>`, `!s skip`, `!s pause`, "
         "`!s next`, `!s shuffle`, `!s resume`, `!s queue`, `!s clear`, "
         "`!s loop <track|queue|off>`, `!s stop`, "
         "`!s join`, or `!s leave`."
@@ -1812,12 +1808,9 @@ async def local_reminder(ctx: commands.Context, duration: str, *, text: str):
 
 
 @local_s.command(name="play")
-async def local_play(ctx: commands.Context, url: str):
+async def local_play(ctx: commands.Context, *, url: str):
     if ctx.guild is None or not isinstance(ctx.author, discord.Member):
         await ctx.send("This command can only be used inside a server.")
-        return
-    if MUSIC_URL_PATTERN.match(url.strip()) is None:
-        await ctx.send("Use a YouTube or Spotify track or playlist link.")
         return
     try:
         message = await queue_music_track(ctx.guild, ctx.author, ctx.channel, url)
