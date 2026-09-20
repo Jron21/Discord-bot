@@ -17,10 +17,14 @@ from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 
 import discord
-import instaloader
 from dotenv import load_dotenv
 from discord.ext import commands
 from yt_dlp import DownloadError, YoutubeDL
+
+try:
+    import instaloader
+except ImportError:
+    instaloader = None
 
 load_dotenv()
 
@@ -611,6 +615,10 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
 
 def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
     """Use Instaloader to fetch the actual child images from an Instagram carousel."""
+    if instaloader is None:
+        logger.warning("Instaloader is not installed; skipping Instagram carousel extraction")
+        return []
+
     match = INSTAGRAM_POST_PATTERN.search(url)
     if match is None:
         return []
