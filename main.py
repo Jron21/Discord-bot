@@ -1,6 +1,7 @@
 import os
 import random
 import asyncio
+import hashlib
 import json
 import logging
 from collections import deque
@@ -11,7 +12,7 @@ import re
 import shutil
 import tempfile
 import time
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urljoin, urlparse
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 
@@ -482,70 +483,125 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
 
 
 def download_instagram_images(url: str, directory: str) -> list[Path]:
-    """Download all images exposed by an Instagram carousel embed."""
+    """Download all images exposed by an Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
     if match is None:
         return []
 
-    embed_url = f"https://www.instagram.com/p/{match.group(1)}/embed/captioned/"
-    request = Request(embed_url, headers={"User-Agent": "Mozilla/5.0"})
+    shortcode = match.group(1)
+    parsed_url = urlparse(url)
+    query_params = parse_qs(parsed_url.query)
+    img_index_values = []
+    for key in ("img_index", "index"):
+        values = query_params.get(key, [])
+        for value in values:
+            try:
+                img_index_values.append(int(value))
+            except ValueError:
+                continue
 
-    try:
-        with urlopen(request, timeout=30) as response:
-            page = response.read().decode("utf-8", errors="ignore")
-    except OSError:
+    extra_page_urls: list[str] = []
+    if img_index_values:
+        for index in range(1, max(img_index_values) + 2):
+            extra_page_urls.append(f"https://www.instagram.com/p/{shortcode}/?img_index={index}&stkn={query_params.get('stkn', [''])[0]}")
+
+    page_urls = [
+        f"https://www.instagram.com/p/{shortcode}/",
+        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
+        *extra_page_urls,
+    ]
+    pages = []
+    for page_url in dict.fromkeys(page_urls):
+        request = Request(page_url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=30) as response:
+                pages.append(response.read().decode("utf-8", errors="ignore"))
+        except OSError:
+            continue
+
+    if not pages:
         return []
 
-    embedded_image_urls = re.findall(
-        r'EmbeddedMediaImage[^>]*?src=["\']([^"\']+)',
-        page,
-        re.IGNORECASE,
-    )
-    escaped_image_urls = []
-    search_position = 0
-    while True:
-        marker_position = page.lower().find("display_url", search_position)
-        if marker_position < 0:
-            break
+    image_urls = []
+    for page in pages:
+        embedded_image_urls = re.findall(
+            r'EmbeddedMediaImage[^>]*?src=["\']([^"\']+)',
+            page,
+            re.IGNORECASE,
+        )
+        escaped_image_urls = []
+        search_position = 0
+        while True:
+            marker_position = page.lower().find("display_url", search_position)
+            if marker_position < 0:
+                break
 
-        url_start = page.find("https:", marker_position)
-        next_field = page.find("display_resources", url_start)
-        next_display = page.lower().find("display_url", url_start)
-        field_positions = [position for position in (next_field, next_display) if position >= 0]
-        next_field = min(field_positions) if field_positions else len(page)
-        if url_start >= 0:
-            escaped_image_urls.append(page[url_start:next_field].rstrip('\\",'))
-        search_position = marker_position + len("display_url")
+            url_start = page.find("https:", marker_position)
+            next_field = page.find("display_resources", url_start)
+            next_display = page.lower().find("display_url", url_start)
+            field_positions = [position for position in (next_field, next_display) if position >= 0]
+            next_field = min(field_positions) if field_positions else len(page)
+            if url_start >= 0:
+                escaped_image_urls.append(page[url_start:next_field].rstrip('\\",'))
+            search_position = marker_position + len("display_url")
 
-    normalized_page = (
-        page.replace(r"\/", "/")
-        .replace(r"\u0026", "&")
-        .replace(r"\u00253D", "%3D")
-        .replace("&amp;", "&")
-        .replace("\\", "")
-    )
-    image_urls = embedded_image_urls
-    image_urls.extend(escaped_image_urls)
-    image_urls = [
-        unescape(image_url).replace(r"\/", "/")
-        .replace(r"\u0026", "&")
-        .replace(r"\u00253D", "%3D")
-        .replace("\\", "")
-        for image_url in image_urls
-    ]
+        meta_image_urls = re.findall(
+            r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)',
+            page,
+            re.IGNORECASE,
+        )
 
-    unique_urls = list(dict.fromkeys(image_urls))
+        image_urls.extend(embedded_image_urls)
+        image_urls.extend(escaped_image_urls)
+        image_urls.extend(meta_image_urls)
+
+    cleaned_urls = []
+    for image_url in image_urls:
+        cleaned = (
+            unescape(image_url)
+            .replace(r"\/", "/")
+            .replace(r"\u0026", "&")
+            .replace(r"\u00253D", "%3D")
+            .replace("&amp;", "&")
+            .replace("\\", "")
+        )
+        if re.search(r"\.(?:jpe?g|png|webp|avif)(?:\?|$)", cleaned, re.IGNORECASE) and (
+            "cdninstagram" in cleaned or "scontent" in cleaned or "fbcdn" in cleaned
+        ):
+            cleaned_urls.append(cleaned)
+
+    unique_urls = list(dict.fromkeys(cleaned_urls))
     paths = []
+    content_hashes: set[bytes] = set()
     for image_index, image_url in enumerate(unique_urls, start=1):
         image_path = download_image_url(
             image_url,
             directory,
-            f"instagram-{match.group(1)}-{image_index}",
+            f"instagram-{shortcode}-{image_index}",
         )
-        if image_path is not None:
-            paths.append(image_path)
+        if image_path is None:
+            continue
 
-    return paths
+        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        if digest in content_hashes:
+            image_path.unlink(missing_ok=True)
+            continue
+
+        content_hashes.add(digest)
+        paths.append(image_path)
+
+    if paths:
+        return paths
+
+    og_image = download_open_graph_image(url, directory)
+    if og_image is not None:
+        return [og_image]
+
+    public_page_image = download_open_graph_image(f"https://www.instagram.com/p/{shortcode}/", directory)
+    if public_page_image is not None:
+        return [public_page_image]
+
+    return []
 
 
 def download_social_media(url: str, directory: str) -> list[Path]:
