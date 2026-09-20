@@ -17,6 +17,7 @@ from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 
 import discord
+import instaloader
 from dotenv import load_dotenv
 from discord.ext import commands
 from yt_dlp import DownloadError, YoutubeDL
@@ -522,6 +523,10 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
     if not pages:
         return []
 
+    sidecar_paths = download_instagram_sidecar_images(url, directory)
+    if sidecar_paths:
+        return sidecar_paths
+
     image_urls = []
     for page in pages:
         embedded_image_urls = re.findall(
@@ -602,6 +607,53 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
         return [public_page_image]
 
     return []
+
+
+def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
+    """Use Instaloader to fetch the actual child images from an Instagram carousel."""
+    match = INSTAGRAM_POST_PATTERN.search(url)
+    if match is None:
+        return []
+
+    shortcode = match.group(1)
+    try:
+        loader = instaloader.Instaloader()
+        post = instaloader.Post.from_shortcode(loader.context, shortcode)
+    except Exception as exc:  # pragma: no cover - defensive fallback.
+        logger.warning("Instaloader could not fetch Instagram post %s: %s", shortcode, exc)
+        return []
+
+    paths: list[Path] = []
+    content_hashes: set[bytes] = set()
+
+    try:
+        nodes = list(post.get_sidecar_nodes())
+    except Exception as exc:  # pragma: no cover - defensive fallback.
+        logger.warning("Instaloader could not enumerate carousel nodes for %s: %s", shortcode, exc)
+        return []
+
+    for image_index, node in enumerate(nodes, start=1):
+        image_url = getattr(node, "display_url", None)
+        if not image_url:
+            continue
+
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"instagram-{shortcode}-{image_index}",
+        )
+        if image_path is None:
+            continue
+
+        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        if digest in content_hashes:
+            image_path.unlink(missing_ok=True)
+            continue
+
+        content_hashes.add(digest)
+        paths.append(image_path)
+
+    return paths
 
 
 def download_social_media(url: str, directory: str) -> list[Path]:
