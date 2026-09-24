@@ -679,6 +679,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     resolved_url = resolve_redirect_url(url)
     resolved_hostname = (urlparse(resolved_url).hostname or "").lower()
     is_tiktok = resolved_hostname.endswith("tiktok.com")
+    is_facebook = resolved_hostname.endswith("facebook.com")
     tiktok_images = (
         download_tiktok_photo(resolved_url, directory) if is_tiktok else []
     )
@@ -688,6 +689,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     instagram_images = (
         download_instagram_images(url, directory) if is_instagram_post else []
     )
+    facebook_images: list[Path] = []
 
     if is_twitter_status:
         twitter_image = download_twitter_image(url, directory)
@@ -725,6 +727,24 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             raise
 
         entries = list(info.get("entries") or [info])
+
+        if is_facebook:
+            thumbnail_url = next(
+                (
+                    entry.get("thumbnail")
+                    for entry in entries
+                    if entry.get("thumbnail")
+                ),
+                None,
+            )
+            if thumbnail_url:
+                thumbnail_path = download_image_url(
+                    thumbnail_url,
+                    directory,
+                    "facebook-image",
+                )
+                if thumbnail_path is not None:
+                    facebook_images.append(thumbnail_path)
 
         video_entry = next(
             (entry for entry in entries if entry.get("formats")),
@@ -768,7 +788,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     if not files:
         raise DownloadError("No media file was downloaded")
 
-    extracted_images = tiktok_images + instagram_images
+    extracted_images = tiktok_images + instagram_images + facebook_images
     if extracted_images:
         downloaded_images = {path.resolve() for path in extracted_images}
         video_paths = [path for path in files if path.resolve() not in downloaded_images]
