@@ -64,6 +64,7 @@ def resolve_ffmpeg_path() -> str:
 FFMPEG_PATH = resolve_ffmpeg_path()
 MAX_SPOTIFY_PLAYLIST_TRACKS = 100
 YOUTUBE_COOKIES_FILE = os.getenv("YOUTUBE_COOKIES_FILE")
+FACEBOOK_COOKIES_FILE = os.getenv("FACEBOOK_COOKIES_FILE")
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -393,6 +394,34 @@ def download_image_url(
     return image_path
 
 
+def download_media_url(
+    media_url: str,
+    directory: str,
+    filename: str,
+    default_extension: str = ".mp4",
+) -> Path | None:
+    """Download a direct media URL while preserving its response type."""
+    extension = Path(urlparse(media_url).path).suffix.lower() or default_extension
+    temporary_path = Path(directory) / f"{filename}.download"
+    request = Request(media_url, headers={"User-Agent": BROWSER_USER_AGENT})
+
+    try:
+        with urlopen(request, timeout=30) as response, temporary_path.open("wb") as output:
+            content_type = response.headers.get_content_type()
+            extension = {
+                "video/mp4": ".mp4",
+                "video/webm": ".webm",
+                "image/gif": ".gif",
+            }.get(content_type, extension)
+            shutil.copyfileobj(response, output)
+    except OSError:
+        return None
+
+    media_path = Path(directory) / f"{filename}{extension}"
+    temporary_path.replace(media_path)
+    return media_path
+
+
 def download_open_graph_image(url: str, directory: str) -> Path | None:
     """Download an image exposed in a supported page's metadata."""
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -419,6 +448,52 @@ def resolve_redirect_url(url: str) -> str:
             return response.geturl()
     except OSError:
         return url
+
+
+def download_facebook_images(
+    url: str,
+    directory: str,
+    excluded_hashes: set[bytes] | None = None,
+) -> list[Path]:
+    """Download distinct image attachments exposed in a Facebook post page."""
+    request = Request(url, headers={"User-Agent": BROWSER_USER_AGENT})
+    try:
+        with urlopen(request, timeout=30) as response:
+            page = response.read().decode("utf-8", errors="ignore")
+    except (OSError, UnicodeError):
+        return []
+
+    image_urls = re.findall(
+        r'https?:\\?/\\?/[^"\\\s]+',
+        page,
+        re.IGNORECASE,
+    )
+    image_urls = [
+        unescape(image_url).replace(r"\/", "/")
+        for image_url in image_urls
+        if "fbcdn.net" in image_url
+        and re.search(r"\.(?:jpe?g|png|webp|gif)(?:\?|$)", image_url, re.IGNORECASE)
+    ]
+
+    paths: list[Path] = []
+    seen_hashes = set(excluded_hashes or set())
+    for image_index, image_url in enumerate(dict.fromkeys(image_urls), start=1):
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"facebook-image-{image_index}",
+        )
+        if image_path is None:
+            continue
+
+        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        if digest in seen_hashes:
+            image_path.unlink(missing_ok=True)
+            continue
+        seen_hashes.add(digest)
+        paths.append(image_path)
+
+    return paths
 
 
 def download_tiktok_photo(url: str, directory: str) -> list[Path]:
@@ -624,7 +699,7 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
 
 
 def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
-    """Use Instaloader to fetch the actual child images from an Instagram carousel."""
+    """Use Instaloader to fetch all child images and videos from a carousel."""
     if instaloader is None:
         logger.warning("Instaloader is not installed; skipping Instagram carousel extraction")
         return []
@@ -651,25 +726,34 @@ def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
         return []
 
     for image_index, node in enumerate(nodes, start=1):
-        image_url = getattr(node, "display_url", None)
-        if not image_url:
+        is_video = bool(getattr(node, "is_video", False))
+        media_url = getattr(node, "video_url", None) if is_video else getattr(node, "display_url", None)
+        if not media_url:
             continue
 
-        image_path = download_image_url(
-            image_url,
-            directory,
-            f"instagram-{shortcode}-{image_index}",
+        media_path = (
+            download_media_url(
+                media_url,
+                directory,
+                f"instagram-{shortcode}-{image_index}",
+            )
+            if is_video
+            else download_image_url(
+                media_url,
+                directory,
+                f"instagram-{shortcode}-{image_index}",
+            )
         )
-        if image_path is None:
+        if media_path is None:
             continue
 
-        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        digest = hashlib.sha256(media_path.read_bytes()).digest()
         if digest in content_hashes:
-            image_path.unlink(missing_ok=True)
+            media_path.unlink(missing_ok=True)
             continue
 
         content_hashes.add(digest)
-        paths.append(image_path)
+        paths.append(media_path)
 
     return paths
 
@@ -697,13 +781,22 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             return [twitter_image]
 
     options = {
-        "noplaylist": not is_instagram_post and not is_tiktok,
+        "noplaylist": not is_instagram_post and not is_tiktok and not is_facebook,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
         "quiet": True,
         "no_warnings": True,
         "restrictfilenames": True,
     }
+    if is_facebook and FACEBOOK_COOKIES_FILE:
+        cookie_path = Path(FACEBOOK_COOKIES_FILE).expanduser()
+        if cookie_path.is_file():
+            options["cookiefile"] = str(cookie_path)
+        else:
+            logger.warning(
+                "Configured FACEBOOK_COOKIES_FILE does not exist: %s",
+                cookie_path,
+            )
 
     with YoutubeDL(options) as downloader:
         try:
@@ -745,6 +838,14 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 )
                 if thumbnail_path is not None:
                     facebook_images.append(thumbnail_path)
+
+            thumbnail_hashes = {
+                hashlib.sha256(path.read_bytes()).digest()
+                for path in facebook_images
+            }
+            facebook_images.extend(
+                download_facebook_images(url, directory, thumbnail_hashes)
+            )
 
         video_entry = next(
             (entry for entry in entries if entry.get("formats")),
