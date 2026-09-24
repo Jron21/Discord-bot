@@ -411,6 +411,16 @@ def download_open_graph_image(url: str, directory: str) -> Path | None:
     return download_image_url(image_url, directory, "open-graph-image")
 
 
+def resolve_redirect_url(url: str) -> str:
+    """Follow short links before handing them to media extractors."""
+    request = Request(url, headers={"User-Agent": BROWSER_USER_AGENT})
+    try:
+        with urlopen(request, timeout=30) as response:
+            return response.geturl()
+    except OSError:
+        return url
+
+
 def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     """Download images from a TikTok photo post page."""
     api_url = f"https://www.tikwm.com/api/?url={quote(url, safe='')}"
@@ -458,7 +468,7 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     )
     image_urls.extend(
         re.findall(
-            r'https?:\\?/\\?/[^"\'\s]+(?:\.jpe?g|\.png|\.webp|\.avif)'
+            r'https?:\\?/\\?/[^"\'\s]+(?:\.jpe?g|\.png|\.webp|\.avif|\.gif)'
             r'(?:[^"\'\s]*)',
             page,
             re.IGNORECASE,
@@ -574,7 +584,7 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
             .replace("&amp;", "&")
             .replace("\\", "")
         )
-        if re.search(r"\.(?:jpe?g|png|webp|avif)(?:\?|$)", cleaned, re.IGNORECASE) and (
+        if re.search(r"\.(?:jpe?g|png|webp|avif|gif)(?:\?|$)", cleaned, re.IGNORECASE) and (
             "cdninstagram" in cleaned or "scontent" in cleaned or "fbcdn" in cleaned
         ):
             cleaned_urls.append(cleaned)
@@ -666,8 +676,18 @@ def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
 
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
+    resolved_url = resolve_redirect_url(url)
+    resolved_hostname = (urlparse(resolved_url).hostname or "").lower()
+    is_tiktok = resolved_hostname.endswith("tiktok.com")
+    tiktok_images = (
+        download_tiktok_photo(resolved_url, directory) if is_tiktok else []
+    )
+    url = resolved_url
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
     is_instagram_post = INSTAGRAM_POST_PATTERN.search(url) is not None
+    instagram_images = (
+        download_instagram_images(url, directory) if is_instagram_post else []
+    )
 
     if is_twitter_status:
         twitter_image = download_twitter_image(url, directory)
@@ -675,7 +695,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             return [twitter_image]
 
     options = {
-        "noplaylist": not is_instagram_post,
+        "noplaylist": not is_instagram_post and not is_tiktok,
         "outtmpl": str(Path(directory) / "%(id)s.%(ext)s"),
         "format": "best[ext=mp4]/best",
         "quiet": True,
@@ -692,9 +712,10 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 return [twitter_image]
             if is_twitter_status:
                 raise DownloadError("No image was found in the Twitter/X post")
-            instagram_images = download_instagram_images(url, directory)
             if instagram_images:
                 return instagram_images
+            if tiktok_images:
+                return tiktok_images
             tiktok_photos = download_tiktok_photo(url, directory)
             if tiktok_photos:
                 return tiktok_photos
@@ -746,6 +767,12 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     files = [path for path in Path(directory).iterdir() if path.is_file()]
     if not files:
         raise DownloadError("No media file was downloaded")
+
+    extracted_images = tiktok_images + instagram_images
+    if extracted_images:
+        downloaded_images = {path.resolve() for path in extracted_images}
+        video_paths = [path for path in files if path.resolve() not in downloaded_images]
+        return extracted_images + video_paths
 
     if is_instagram_post:
         return sorted(files, key=lambda path: path.stat().st_mtime)
@@ -1067,8 +1094,28 @@ def resolve_music_track(url: str) -> MusicTrack:
             options["cookiefile"] = str(cookie_path)
         else:
             logger.warning("Configured YOUTUBE_COOKIES_FILE does not exist: %s", cookie_path)
-    with YoutubeDL(options) as downloader:
-        info = downloader.extract_info(lookup, download=False)
+    extraction_errors = []
+    youtube_clients = (None, "web_safari", "android_vr")
+    for player_client in youtube_clients:
+        client_options = dict(options)
+        if player_client is not None:
+            client_options["extractor_args"] = {
+                "youtube": {"player_client": [player_client]}
+            }
+        try:
+            with YoutubeDL(client_options) as downloader:
+                info = downloader.extract_info(lookup, download=False)
+            break
+        except DownloadError as error:
+            extraction_errors.append(error)
+    else:
+        error_text = str(extraction_errors[-1]) if extraction_errors else ""
+        if "sign in to confirm" in error_text.lower() or "not a bot" in error_text.lower():
+            raise ValueError(
+                "YouTube requires bot verification. Set YOUTUBE_COOKIES_FILE "
+                "to a valid exported YouTube cookies file and try again."
+            ) from extraction_errors[-1]
+        raise extraction_errors[-1]
 
     if info is None:
         raise ValueError("No playable result was found")
