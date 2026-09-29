@@ -393,6 +393,34 @@ def download_image_url(
     return image_path
 
 
+def download_instagram_video_url(
+    video_url: str,
+    directory: str,
+    filename: str,
+) -> Path | None:
+    temporary_path = Path(directory) / f"{filename}.download"
+    video_path = Path(directory) / f"{filename}.mp4"
+    request = Request(video_url, headers={"User-Agent": "Mozilla/5.0"})
+
+    try:
+        with urlopen(request, timeout=30) as response, temporary_path.open("wb") as output:
+            shutil.copyfileobj(response, output)
+    except OSError:
+        temporary_path.unlink(missing_ok=True)
+        return None
+
+    temporary_path.replace(video_path)
+    return video_path
+
+
+def sha256_file(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as media_file:
+        for chunk in iter(lambda: media_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
 def download_open_graph_image(url: str, directory: str) -> Path | None:
     """Download an image exposed in a supported page's metadata."""
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -487,8 +515,8 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     return paths
 
 
-def download_instagram_images(url: str, directory: str) -> list[Path]:
-    """Download all images exposed by an Instagram post or carousel."""
+def download_instagram_media(url: str, directory: str) -> list[Path]:
+    """Download media exposed by an Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
     if match is None:
         return []
@@ -527,7 +555,7 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
     if not pages:
         return []
 
-    sidecar_paths = download_instagram_sidecar_images(url, directory)
+    sidecar_paths = download_instagram_sidecar_media(url, directory)
     if sidecar_paths:
         return sidecar_paths
 
@@ -591,7 +619,7 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
         if image_path is None:
             continue
 
-        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        digest = sha256_file(image_path)
         if digest in content_hashes:
             image_path.unlink(missing_ok=True)
             continue
@@ -613,8 +641,8 @@ def download_instagram_images(url: str, directory: str) -> list[Path]:
     return []
 
 
-def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
-    """Use Instaloader to fetch the actual child images from an Instagram carousel."""
+def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
+    """Use Instaloader to fetch all child media from an Instagram carousel."""
     if instaloader is None:
         logger.warning("Instaloader is not installed; skipping Instagram carousel extraction")
         return []
@@ -631,6 +659,9 @@ def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
         logger.warning("Instaloader could not fetch Instagram post %s: %s", shortcode, exc)
         return []
 
+    if getattr(post, "typename", None) != "GraphSidecar":
+        return []
+
     paths: list[Path] = []
     content_hashes: set[bytes] = set()
 
@@ -641,25 +672,31 @@ def download_instagram_sidecar_images(url: str, directory: str) -> list[Path]:
         return []
 
     for image_index, node in enumerate(nodes, start=1):
-        image_url = getattr(node, "display_url", None)
-        if not image_url:
-            continue
-
-        image_path = download_image_url(
-            image_url,
-            directory,
-            f"instagram-{shortcode}-{image_index}",
+        is_video = getattr(node, "is_video", False)
+        media_url = (
+            getattr(node, "video_url", None)
+            if is_video
+            else getattr(node, "display_url", None)
         )
-        if image_path is None:
+        if not media_url:
             continue
 
-        digest = hashlib.sha256(image_path.read_bytes()).digest()
+        filename = f"instagram-{shortcode}-{image_index}"
+        media_path = (
+            download_instagram_video_url(media_url, directory, filename)
+            if is_video
+            else download_image_url(media_url, directory, filename)
+        )
+        if media_path is None:
+            continue
+
+        digest = sha256_file(media_path)
         if digest in content_hashes:
-            image_path.unlink(missing_ok=True)
+            media_path.unlink(missing_ok=True)
             continue
 
         content_hashes.add(digest)
-        paths.append(image_path)
+        paths.append(media_path)
 
     return paths
 
@@ -668,6 +705,11 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
     is_instagram_post = INSTAGRAM_POST_PATTERN.search(url) is not None
+
+    if is_instagram_post:
+        instagram_media = download_instagram_sidecar_media(url, directory)
+        if instagram_media:
+            return instagram_media
 
     if is_twitter_status:
         twitter_image = download_twitter_image(url, directory)
@@ -692,9 +734,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 return [twitter_image]
             if is_twitter_status:
                 raise DownloadError("No image was found in the Twitter/X post")
-            instagram_images = download_instagram_images(url, directory)
-            if instagram_images:
-                return instagram_images
+            instagram_media = download_instagram_media(url, directory)
+            if instagram_media:
+                return instagram_media
             tiktok_photos = download_tiktok_photo(url, directory)
             if tiktok_photos:
                 return tiktok_photos
@@ -715,9 +757,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         else:
             if is_twitter_status:
                 raise DownloadError("No image was found in the Twitter/X post")
-            instagram_images = download_instagram_images(url, directory)
-            if instagram_images:
-                return instagram_images
+            instagram_media = download_instagram_media(url, directory)
+            if instagram_media:
+                return instagram_media
             image_entry = next(
                 (
                     entry for entry in entries
