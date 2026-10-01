@@ -383,6 +383,12 @@ def download_image_url(
                 "image/png": ".png",
                 "image/gif": ".gif",
                 "image/webp": ".webp",
+                "image/avif": ".avif",
+                "video/mp4": ".mp4",
+                "video/webm": ".webm",
+                "video/quicktime": ".mov",
+                "video/x-matroska": ".mkv",
+                "application/octet-stream": ".mp4" if "/mp4" in image_url.lower() else extension,
             }.get(content_type, extension)
             shutil.copyfileobj(response, output)
     except OSError:
