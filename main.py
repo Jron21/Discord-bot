@@ -454,7 +454,7 @@ def download_open_graph_image(url: str, directory: str) -> Path | None:
     return download_image_url(image_url, directory, "open-graph-image")
 
 
-def _is_visual_tiktok_media_url(media_url: str) -> bool:
+def _is_video_tiktok_media_url(media_url: str) -> bool:
     lower_url = media_url.lower()
     query = parse_qs(urlparse(media_url).query)
     mime_type = query.get("mime_type", [""])[0].lower()
@@ -463,9 +463,18 @@ def _is_visual_tiktok_media_url(media_url: str) -> bool:
         return False
     if "video" in mime_type or "video" in lower_url:
         return True
-    if re.search(r"(?:\.jpe?g|\.png|\.webp|\.avif|\.gif|\.heic)(?:\?|$)", lower_url):
-        return True
     if re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", lower_url):
+        return True
+    return False
+
+
+def _is_image_tiktok_media_url(media_url: str) -> bool:
+    lower_url = media_url.lower()
+    if _is_video_tiktok_media_url(media_url):
+        return False
+    if "audio" in lower_url or "music" in lower_url:
+        return False
+    if re.search(r"(?:\.jpe?g|\.png|\.webp|\.avif|\.gif|\.heic)(?:\?|$)", lower_url):
         return True
     return False
 
@@ -489,41 +498,29 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
 
     data = payload.get("data") or {}
 
-    visual_urls: list[str] = []
-    for key in ("images", "live_images"):
+    video_urls: list[str] = []
+    image_urls: list[str] = []
+
+    for key in ("live_images", "images"):
         value = data.get(key)
         if isinstance(value, str):
-            if _is_visual_tiktok_media_url(value):
-                visual_urls.append(value)
+            if _is_video_tiktok_media_url(value):
+                video_urls.append(value)
+            elif _is_image_tiktok_media_url(value):
+                image_urls.append(value)
         elif isinstance(value, list):
             for item in value:
-                if isinstance(item, str) and _is_visual_tiktok_media_url(item):
-                    visual_urls.append(item)
+                if isinstance(item, str):
+                    if _is_video_tiktok_media_url(item):
+                        video_urls.append(item)
+                    elif _is_image_tiktok_media_url(item):
+                        image_urls.append(item)
 
     for key in ("cover", "origin_cover", "ai_dynamic_cover"):
         value = data.get(key)
-        if isinstance(value, str) and _is_visual_tiktok_media_url(value):
-            visual_urls.append(value)
+        if isinstance(value, str) and _is_image_tiktok_media_url(value):
+            image_urls.append(value)
 
-    if visual_urls:
-        paths: list[Path] = []
-        seen_urls: set[str] = set()
-        for media_index, media_url in enumerate(dict.fromkeys(visual_urls), start=1):
-            if media_url in seen_urls:
-                continue
-            seen_urls.add(media_url)
-
-            if re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", media_url, re.IGNORECASE):
-                media_path = download_instagram_video_url(media_url, directory, f"tiktok-media-{media_index}")
-            else:
-                media_path = download_image_url(media_url, directory, f"tiktok-media-{media_index}")
-
-            if media_path is not None:
-                paths.append(media_path)
-        if paths:
-            return paths
-
-    media_urls: list[str] = []
     for key in (
         "play",
         "hdplay",
@@ -538,33 +535,39 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
     ):
         value = data.get(key)
         if isinstance(value, str):
-            if _is_visual_tiktok_media_url(value):
-                media_urls.append(value)
+            if _is_video_tiktok_media_url(value):
+                video_urls.append(value)
+            elif _is_image_tiktok_media_url(value):
+                image_urls.append(value)
         elif isinstance(value, list):
             for item in value:
-                if isinstance(item, str) and _is_visual_tiktok_media_url(item):
-                    media_urls.append(item)
+                if isinstance(item, str):
+                    if _is_video_tiktok_media_url(item):
+                        video_urls.append(item)
+                    elif _is_image_tiktok_media_url(item):
+                        image_urls.append(item)
 
-    if not media_urls:
-        return download_tiktok_photo(url, directory)
-
-    paths = []
-    seen_urls = set()
-    for media_index, media_url in enumerate(dict.fromkeys(media_urls), start=1):
-        if media_url in seen_urls:
+    for media_urls, label in ((video_urls, "video"), (image_urls, "image")):
+        if not media_urls:
             continue
-        seen_urls.add(media_url)
 
-        if re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", media_url, re.IGNORECASE):
-            media_path = download_instagram_video_url(media_url, directory, f"tiktok-media-{media_index}")
-        else:
-            media_path = download_image_url(media_url, directory, f"tiktok-media-{media_index}")
+        paths: list[Path] = []
+        seen_urls: set[str] = set()
+        for media_index, media_url in enumerate(dict.fromkeys(media_urls), start=1):
+            if media_url in seen_urls:
+                continue
+            seen_urls.add(media_url)
 
-        if media_path is not None:
-            paths.append(media_path)
+            if label == "video" or re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", media_url, re.IGNORECASE):
+                media_path = download_instagram_video_url(media_url, directory, f"tiktok-media-{media_index}")
+            else:
+                media_path = download_image_url(media_url, directory, f"tiktok-media-{media_index}")
 
-    if paths:
-        return paths
+            if media_path is not None:
+                paths.append(media_path)
+
+        if paths:
+            return paths
 
     return download_tiktok_photo(url, directory)
 
