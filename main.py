@@ -439,6 +439,58 @@ def download_open_graph_image(url: str, directory: str) -> Path | None:
     return download_image_url(image_url, directory, "open-graph-image")
 
 
+def download_tiktok_media(url: str, directory: str) -> list[Path]:
+    """Download direct video or image media from a TikTok post or share link."""
+    api_url = f"https://www.tikwm.com/api/?url={quote(url, safe='')}"
+    api_request = Request(
+        api_url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0",
+        },
+    )
+
+    try:
+        with urlopen(api_request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return []
+
+    data = payload.get("data") or {}
+    media_urls: list[str] = []
+    for key in ("play", "hdplay", "play_url", "video", "video_url", "download", "download_url"):
+        value = data.get(key)
+        if isinstance(value, str) and value.startswith("http"):
+            media_urls.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, str) and item.startswith("http"):
+                    media_urls.append(item)
+
+    if not media_urls:
+        return download_tiktok_photo(url, directory)
+
+    paths: list[Path] = []
+    seen_urls: set[str] = set()
+    for media_index, media_url in enumerate(dict.fromkeys(media_urls), start=1):
+        if media_url in seen_urls:
+            continue
+        seen_urls.add(media_url)
+
+        if re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", media_url, re.IGNORECASE):
+            media_path = download_instagram_video_url(media_url, directory, f"tiktok-media-{media_index}")
+        else:
+            media_path = download_image_url(media_url, directory, f"tiktok-media-{media_index}")
+
+        if media_path is not None:
+            paths.append(media_path)
+
+    if paths:
+        return paths
+
+    return download_tiktok_photo(url, directory)
+
+
 def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     """Download images from a TikTok photo post page."""
     api_url = f"https://www.tikwm.com/api/?url={quote(url, safe='')}"
@@ -705,6 +757,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
     is_instagram_post = INSTAGRAM_POST_PATTERN.search(url) is not None
+    parsed_url = urlparse(url)
+    is_tiktok_url = bool(parsed_url.hostname and "tiktok.com" in parsed_url.hostname.lower())
 
     if is_instagram_post:
         instagram_media = download_instagram_sidecar_media(url, directory)
@@ -715,6 +769,11 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         twitter_image = download_twitter_image(url, directory)
         if twitter_image is not None:
             return [twitter_image]
+
+    if is_tiktok_url:
+        tiktok_media = download_tiktok_media(url, directory)
+        if tiktok_media:
+            return tiktok_media
 
     options = {
         "noplaylist": not is_instagram_post,
@@ -737,9 +796,10 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             instagram_media = download_instagram_media(url, directory)
             if instagram_media:
                 return instagram_media
-            tiktok_photos = download_tiktok_photo(url, directory)
-            if tiktok_photos:
-                return tiktok_photos
+            if is_tiktok_url:
+                tiktok_media = download_tiktok_media(url, directory)
+                if tiktok_media:
+                    return tiktok_media
             open_graph_image = download_open_graph_image(url, directory)
             if open_graph_image is not None:
                 return [open_graph_image]
@@ -760,6 +820,10 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             instagram_media = download_instagram_media(url, directory)
             if instagram_media:
                 return instagram_media
+            if is_tiktok_url:
+                tiktok_media = download_tiktok_media(url, directory)
+                if tiktok_media:
+                    return tiktok_media
             image_entry = next(
                 (
                     entry for entry in entries
