@@ -436,6 +436,26 @@ def sha256_file(path: Path) -> bytes:
     return digest.digest()
 
 
+def dedupe_media_paths(paths: list[Path]) -> list[Path]:
+    """Return a list of unique files, removing duplicates by content hash."""
+    unique_paths: list[Path] = []
+    seen_hashes: set[bytes] = set()
+
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+
+        digest = sha256_file(path)
+        if digest in seen_hashes:
+            path.unlink(missing_ok=True)
+            continue
+
+        seen_hashes.add(digest)
+        unique_paths.append(path)
+
+    return unique_paths
+
+
 def download_open_graph_image(url: str, directory: str) -> Path | None:
     """Download an image exposed in a supported page's metadata."""
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -566,10 +586,11 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
             if media_path is not None:
                 paths.append(media_path)
 
-        if paths:
-            return paths
+        deduped_paths = dedupe_media_paths(paths)
+        if deduped_paths:
+            return deduped_paths
 
-    return download_tiktok_photo(url, directory)
+    return dedupe_media_paths(download_tiktok_photo(url, directory))
 
 
 def download_tiktok_photo(url: str, directory: str) -> list[Path]:
@@ -600,8 +621,9 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
         if image_path is not None:
             paths.append(image_path)
 
-    if paths:
-        return paths
+    deduped_paths = dedupe_media_paths(paths)
+    if deduped_paths:
+        return deduped_paths
 
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
 
@@ -645,7 +667,7 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
         if image_path is not None:
             paths.append(image_path)
 
-    return paths
+    return dedupe_media_paths(paths)
 
 
 def download_instagram_media(url: str, directory: str) -> list[Path]:
@@ -761,15 +783,15 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         paths.append(image_path)
 
     if paths:
-        return paths
+        return dedupe_media_paths(paths)
 
     og_image = download_open_graph_image(url, directory)
     if og_image is not None:
-        return [og_image]
+        return dedupe_media_paths([og_image])
 
     public_page_image = download_open_graph_image(f"https://www.instagram.com/p/{shortcode}/", directory)
     if public_page_image is not None:
-        return [public_page_image]
+        return dedupe_media_paths([public_page_image])
 
     return []
 
@@ -831,7 +853,7 @@ def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
         content_hashes.add(digest)
         paths.append(media_path)
 
-    return paths
+    return dedupe_media_paths(paths)
 
 
 def download_social_media(url: str, directory: str) -> list[Path]:
@@ -930,7 +952,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             if image_path is None:
                 raise DownloadError("The image could not be downloaded")
 
-    files = [path for path in Path(directory).iterdir() if path.is_file()]
+    files = dedupe_media_paths([path for path in Path(directory).iterdir() if path.is_file()])
     if not files:
         raise DownloadError("No media file was downloaded")
 
@@ -1001,6 +1023,8 @@ async def extract_social_media(message: discord.Message, url: str) -> None:
                 mention_author=False,
             )
             return
+
+        media_paths = dedupe_media_paths(media_paths)
 
         if any(path.stat().st_size > MAX_MEDIA_BYTES for path in media_paths):
             size_mb = MAX_MEDIA_BYTES / (1024 * 1024)
@@ -1727,6 +1751,8 @@ async def send_downloaded_media(
                 "Something went wrong while downloading that media."
             )
             return
+
+        media_paths = dedupe_media_paths(media_paths)
 
         if any(path.stat().st_size > MAX_MEDIA_BYTES for path in media_paths):
             size_mb = MAX_MEDIA_BYTES / (1024 * 1024)
