@@ -378,6 +378,7 @@ def download_image_url(
     try:
         with urlopen(request, timeout=30) as response, temporary_path.open("wb") as output:
             content_type = response.headers.get_content_type()
+            lower_url = image_url.lower()
             extension = {
                 "image/jpeg": ".jpg",
                 "image/png": ".png",
@@ -388,7 +389,15 @@ def download_image_url(
                 "video/webm": ".webm",
                 "video/quicktime": ".mov",
                 "video/x-matroska": ".mkv",
-                "application/octet-stream": ".mp4" if "/mp4" in image_url.lower() else extension,
+                "audio/mpeg": ".mp3",
+                "audio/mp4": ".m4a",
+                "audio/ogg": ".ogg",
+                "audio/webm": ".webm",
+                "application/octet-stream": (
+                    ".mp4" if "mp4" in lower_url or "video" in lower_url
+                    else ".mp3" if "mp3" in lower_url or "audio" in lower_url
+                    else extension
+                ),
             }.get(content_type, extension)
             shutil.copyfileobj(response, output)
     except OSError:
@@ -464,7 +473,18 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
 
     data = payload.get("data") or {}
     media_urls: list[str] = []
-    for key in ("play", "hdplay", "play_url", "video", "video_url", "download", "download_url"):
+    for key in (
+        "play",
+        "hdplay",
+        "wmplay",
+        "playAddr",
+        "play_url",
+        "video",
+        "video_url",
+        "download",
+        "download_url",
+        "downloadAddr",
+    ):
         value = data.get(key)
         if isinstance(value, str) and value.startswith("http"):
             media_urls.append(value)
