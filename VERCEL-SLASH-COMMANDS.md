@@ -5,6 +5,29 @@ always-on `discord.py` bot in `main.py`. The Vercel HTTP handler is
 [`api/interactions.py`](./api/interactions.py). It verifies Discord's request
 signature using `DISCORD_PUBLIC_KEY` before responding.
 
+## 0. Fix the Vercel build before configuring Discord
+
+If the Vercel build log says:
+
+```text
+Found main.py but it does not export a top-level "app", "application", or "handler" variable.
+```
+
+Vercel is treating the always-on Discord bot's `main.py` as the function
+entrypoint instead of loading the FastAPI interaction handler. The Vercel
+setup is declared in `pyproject.toml`:
+
+```toml
+[tool.vercel]
+entrypoint = "api.interactions:app"
+```
+
+The `main` branch now includes this configuration, `api/interactions.py`, and
+`queues/media.py`. In Vercel, open **Deployments** and redeploy the latest
+production commit from `main`. Confirm its commit includes those files and
+that the project's **Root Directory** is the repository root. Wait for the
+build to succeed before trying to save Discord's Interactions Endpoint URL.
+
 ## 1. Check the Discord interactions endpoint
 
 1. Open the Discord Developer Portal and select the bot's application.
