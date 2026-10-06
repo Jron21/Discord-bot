@@ -520,6 +520,7 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
 
     video_urls: list[str] = []
     image_urls: list[str] = []
+    cover_urls: list[str] = []
 
     for key in ("live_images", "images"):
         value = data.get(key)
@@ -539,7 +540,7 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
     for key in ("cover", "origin_cover", "ai_dynamic_cover"):
         value = data.get(key)
         if isinstance(value, str) and _is_image_tiktok_media_url(value):
-            image_urls.append(value)
+            cover_urls.append(value)
 
     for key in (
         "play",
@@ -567,11 +568,8 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
                     elif _is_image_tiktok_media_url(item):
                         image_urls.append(item)
 
+    paths: list[Path] = []
     for media_urls, label in ((video_urls, "video"), (image_urls, "image")):
-        if not media_urls:
-            continue
-
-        paths: list[Path] = []
         seen_urls: set[str] = set()
         for media_index, media_url in enumerate(dict.fromkeys(media_urls), start=1):
             if media_url in seen_urls:
@@ -586,9 +584,23 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
             if media_path is not None:
                 paths.append(media_path)
 
-        deduped_paths = dedupe_media_paths(paths)
-        if deduped_paths:
-            return deduped_paths
+    deduped_paths = dedupe_media_paths(paths)
+    if deduped_paths:
+        return deduped_paths
+
+    cover_paths = []
+    for media_index, media_url in enumerate(dict.fromkeys(cover_urls), start=1):
+        media_path = download_image_url(
+            media_url,
+            directory,
+            f"tiktok-cover-{media_index}",
+        )
+        if media_path is not None:
+            cover_paths.append(media_path)
+
+    deduped_paths = dedupe_media_paths(cover_paths)
+    if deduped_paths:
+        return deduped_paths
 
     return dedupe_media_paths(download_tiktok_photo(url, directory))
 
