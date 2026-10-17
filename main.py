@@ -1704,10 +1704,10 @@ async def test(interaction: discord.Interaction):
 
 
 @bot.tree.command(
-    name="servers",
+    name="server",
     description="Show the servers Sora10Chan is in (owner only)",
 )
-async def servers(interaction: discord.Interaction):
+async def server(interaction: discord.Interaction):
     if interaction.user.id != BOT_OWNER_ID:
         await interaction.response.send_message(
             "Only the bot owner can use this command.",

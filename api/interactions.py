@@ -79,7 +79,7 @@ async def interactions(request: Request) -> JSONResponse:
         return interaction_response("Pong! Sora10Chan is online.")
     if command == "test":
         return interaction_response("Sora10Chan slash commands are working!")
-    if command == "servers":
+    if command == "server":
         member = payload.get("member") or {}
         user = member.get("user") or payload.get("user") or {}
         if user.get("id") != str(BOT_OWNER_ID):

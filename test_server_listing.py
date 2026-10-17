@@ -62,7 +62,7 @@ class ServerCommandInteractionTests(unittest.TestCase):
             "id": "interaction-id",
             "application_id": "application-id",
             "token": "interaction-token",
-            "data": {"name": "servers"},
+            "data": {"name": "server"},
             "member": {"user": {"id": str(user_id)}},
         }
         body = json.dumps(payload).encode()

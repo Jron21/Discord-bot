@@ -122,19 +122,18 @@ error response instead.
 
 ## 6. If commands are missing or stale
 
-The project includes `register_vercel_commands.py` to register the five Vercel
-slash commands (`ping`, `test`, `servers`, `download`, and `media`). Run it
-from a trusted local environment after setting `DISCORD_APPLICATION_ID` and
-`DISCORD_TOKEN` (or `DISCORD_BOT_TOKEN`):
+The project includes `register_vercel_commands.py` to register or update only
+the `/server` command without replacing other application commands. Run it
+from a trusted local environment after setting `DISCORD_TOKEN` (or
+`DISCORD_BOT_TOKEN`). If `DISCORD_APPLICATION_ID` is not set, the script
+retrieves the bot's application ID using that token:
 
 ```text
 python register_vercel_commands.py
 ```
 
-The script replaces the application's global command list with those five
-commands. For `/servers`, make sure `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN` is
-also configured in Vercel for the Production environment, then redeploy so the
-`queues.servers` subscriber is active. Do not run the registration script just
-to fix an endpoint response when the commands already appear. The
-`bot.tree.sync()` call in `main.py` belongs to the always-on bot deployment
-and is separate from this Vercel registration flow.
+For `/server`, make sure `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN` is also
+configured in Vercel for the Production environment, then redeploy so the
+`queues.servers` subscriber is active. The `bot.tree.sync()` call in `main.py`
+belongs to the always-on bot deployment and is separate from this Vercel
+registration flow.

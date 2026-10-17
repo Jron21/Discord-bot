@@ -8,47 +8,56 @@ load_dotenv()
 
 application_id = os.getenv("DISCORD_APPLICATION_ID")
 bot_token = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
-if not application_id or not bot_token:
-    raise SystemExit("Set DISCORD_APPLICATION_ID and DISCORD_TOKEN first.")
+if not bot_token:
+    raise SystemExit("Set DISCORD_TOKEN or DISCORD_BOT_TOKEN first.")
 
-commands = [
-    {"name": "ping", "description": "Check whether Sora10Chan is responding"},
-    {"name": "test", "description": "Run a quick Sora10Chan test"},
-    {
-        "name": "servers",
-        "description": "Show the servers Sora10Chan is in (owner only)",
-    },
-    {
-        "name": "download",
-        "description": "Download media from Facebook, TikTok, Instagram, or X",
-        "options": [{
-            "type": 3,
-            "name": "url",
-            "description": "Social media URL",
-            "required": True,
-        }],
-    },
-    {
-        "name": "media",
-        "description": "Extract an image, video, or carousel from a social link",
-        "options": [{
-            "type": 3,
-            "name": "url",
-            "description": "Social media URL",
-            "required": True,
-        }],
-    },
-]
+headers = {"Authorization": f"Bot {bot_token}"}
+if not application_id:
+    response = requests.get(
+        "https://discord.com/api/v10/users/@me",
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+    application_id = response.json()["id"]
 
-for command in commands:
-    command["integration_types"] = [0, 1]
-    command["contexts"] = [0, 1, 2]
-
-response = requests.put(
-    f"https://discord.com/api/v10/applications/{application_id}/commands",
-    headers={"Authorization": f"Bot {bot_token}"},
-    json=commands,
-    timeout=30,
+commands_url = (
+    f"https://discord.com/api/v10/applications/{application_id}/commands"
 )
+command = {
+    "name": "server",
+    "description": "Show the servers Sora10Chan is in (owner only)",
+    "integration_types": [0, 1],
+    "contexts": [0, 1, 2],
+}
+
+response = requests.get(commands_url, headers=headers, timeout=30)
 response.raise_for_status()
-print(f"Registered {len(commands)} Vercel slash commands.")
+existing_commands = response.json()
+existing_command = next(
+    (
+        registered
+        for registered in existing_commands
+        if registered.get("name") == command["name"]
+    ),
+    None,
+)
+if existing_command:
+    response = requests.patch(
+        f"{commands_url}/{existing_command['id']}",
+        headers=headers,
+        json=command,
+        timeout=30,
+    )
+    action = "Updated"
+else:
+    response = requests.post(
+        commands_url,
+        headers=headers,
+        json=command,
+        timeout=30,
+    )
+    action = "Registered"
+
+response.raise_for_status()
+print(f"{action} the /server slash command.")
