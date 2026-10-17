@@ -35,6 +35,7 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
+BOT_OWNER_ID = 670920777926705185
 
 
 def resolve_ffmpeg_path() -> str:
@@ -1700,6 +1701,53 @@ async def test(interaction: discord.Interaction):
     await interaction.response.send_message(
         "Sora10Chan slash commands are working!"
     )
+
+
+@bot.tree.command(
+    name="servers",
+    description="Show the servers Sora10Chan is in (owner only)",
+)
+async def servers(interaction: discord.Interaction):
+    if interaction.user.id != BOT_OWNER_ID:
+        await interaction.response.send_message(
+            "Only the bot owner can use this command.",
+            ephemeral=True,
+        )
+        return
+
+    guilds = bot.guilds
+    if not guilds:
+        await interaction.response.send_message(
+            "Sora10Chan is not currently in any servers.",
+            ephemeral=True,
+        )
+        return
+
+    embeds = []
+    for page_start in range(0, len(guilds), 20):
+        page_guilds = guilds[page_start:page_start + 20]
+        page_number = page_start // 20 + 1
+        page_count = (len(guilds) + 19) // 20
+        embed = discord.Embed(
+            title=f"Servers using Sora10Chan ({len(guilds)})",
+            description=f"Page {page_number} of {page_count}",
+        )
+        for guild in page_guilds:
+            member_count = (
+                str(guild.member_count)
+                if guild.member_count is not None
+                else "Unknown"
+            )
+            embed.add_field(
+                name=guild.name,
+                value=f"ID: `{guild.id}` | Members: {member_count}",
+                inline=False,
+            )
+        embeds.append(embed)
+
+    await interaction.response.send_message(embeds=[embeds[0]], ephemeral=True)
+    for embed in embeds[1:]:
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(
