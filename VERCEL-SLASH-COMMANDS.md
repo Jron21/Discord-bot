@@ -53,14 +53,16 @@ that you used its deployment domain.
 1. In the Developer Portal, open the application's **General Information**
    page and copy its **Public Key**.
 2. In Vercel, open the project and go to **Settings > Environment Variables**.
-3. Add this variable for the **Production** environment:
+3. Add these variables for the **Production** environment:
 
    ```text
    DISCORD_PUBLIC_KEY=<the application's Public Key>
+   DISCORD_TOKEN=<the bot token>
    ```
 
    Paste the key as shown: do not add quotes or spaces. It is not the bot token
-   or the application ID.
+   or the application ID. The bot token is used by the server-list queue
+   subscriber to retrieve the bot's server list; keep it private.
 4. Redeploy the production deployment so the function receives the new
    environment variable.
 
@@ -120,16 +122,19 @@ error response instead.
 
 ## 6. If commands are missing or stale
 
-The project includes `register_vercel_commands.py` to register the four Vercel
-slash commands (`ping`, `test`, `download`, and `media`). Run it from a trusted
-local environment after setting `DISCORD_APPLICATION_ID` and
+The project includes `register_vercel_commands.py` to register the five Vercel
+slash commands (`ping`, `test`, `servers`, `download`, and `media`). Run it
+from a trusted local environment after setting `DISCORD_APPLICATION_ID` and
 `DISCORD_TOKEN` (or `DISCORD_BOT_TOKEN`):
 
 ```text
 python register_vercel_commands.py
 ```
 
-The script replaces the application's global command list with those four
-commands. Do not run it just to fix an endpoint response when the commands
-already appear. The `bot.tree.sync()` call in `main.py` belongs to the
-always-on bot deployment and is separate from this Vercel registration flow.
+The script replaces the application's global command list with those five
+commands. For `/servers`, make sure `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN` is
+also configured in Vercel for the Production environment, then redeploy so the
+`queues.servers` subscriber is active. Do not run the registration script just
+to fix an endpoint response when the commands already appear. The
+`bot.tree.sync()` call in `main.py` belongs to the always-on bot deployment
+and is separate from this Vercel registration flow.

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import time
 
@@ -8,12 +9,14 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 from vercel.queue import send
 
-from main import SOCIAL_MEDIA_URL_PATTERN
+from main import BOT_OWNER_ID, SOCIAL_MEDIA_URL_PATTERN
 
 
 app = FastAPI()
 MEDIA_TOPIC = "sora-social-media"
+SERVER_LIST_TOPIC = "sora-server-list"
 PING = {"type": 1}
+logger = logging.getLogger("Sora10Chan.VercelInteractions")
 
 
 def interaction_response(content: str, response_type: int = 4) -> JSONResponse:
@@ -76,6 +79,38 @@ async def interactions(request: Request) -> JSONResponse:
         return interaction_response("Pong! Sora10Chan is online.")
     if command == "test":
         return interaction_response("Sora10Chan slash commands are working!")
+    if command == "servers":
+        member = payload.get("member") or {}
+        user = member.get("user") or payload.get("user") or {}
+        if user.get("id") != str(BOT_OWNER_ID):
+            return JSONResponse({
+                "type": 4,
+                "data": {
+                    "content": "Only the bot owner can use this command.",
+                    "flags": 64,
+                },
+            })
+
+        try:
+            await send(
+                SERVER_LIST_TOPIC,
+                {
+                    "application_id": payload["application_id"],
+                    "interaction_token": payload["token"],
+                },
+                delay=2,
+                idempotency_key=payload["id"],
+            )
+        except Exception:
+            logger.exception("Could not queue the server-list request")
+            return JSONResponse({
+                "type": 4,
+                "data": {
+                    "content": "I couldn't start the server-list request. Please try again.",
+                    "flags": 64,
+                },
+            })
+        return JSONResponse({"type": 5, "data": {"flags": 64}})
     if command not in {"download", "media"}:
         return interaction_response("That command is not available on Vercel.")
 

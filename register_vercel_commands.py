@@ -15,6 +15,10 @@ commands = [
     {"name": "ping", "description": "Check whether Sora10Chan is responding"},
     {"name": "test", "description": "Run a quick Sora10Chan test"},
     {
+        "name": "servers",
+        "description": "Show the servers Sora10Chan is in (owner only)",
+    },
+    {
         "name": "download",
         "description": "Download media from Facebook, TikTok, Instagram, or X",
         "options": [{

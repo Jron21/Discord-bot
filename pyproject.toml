@@ -19,3 +19,6 @@ entrypoint = "api.interactions:app"
 
 [[tool.vercel.subscribers]]
 entrypoint = "queues.media"
+
+[[tool.vercel.subscribers]]
+entrypoint = "queues.servers"
