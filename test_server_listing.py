@@ -7,8 +7,13 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 from nacl.signing import SigningKey
 
-from api.interactions import SERVER_LIST_TOPIC, app
-from queues.servers import fetch_bot_guilds, format_guild_messages
+from api.interactions import SERVER_LIST_TOPIC, USER_INSTALL_TOPIC, app
+from install_tracking import record_personal_install_user, list_personal_install_users
+from queues.servers import (
+    fetch_bot_guilds,
+    format_guild_messages,
+    format_personal_install_messages,
+)
 
 
 class ServerListFormattingTests(unittest.TestCase):
@@ -34,6 +39,14 @@ class ServerListFormattingTests(unittest.TestCase):
         self.assertTrue(all(len(message) <= 1800 for message in messages))
         self.assertEqual(listed_ids, [guild["id"] for guild in guilds])
 
+    def test_formats_personal_install_users_without_pinging_them(self):
+        messages = format_personal_install_messages(["100", "200"])
+
+        self.assertEqual(
+            messages,
+            ["Users seen using a personal install (2):\n<@100> (`100`)\n<@200> (`200`)"],
+        )
+
     def test_fetches_all_guild_pages(self):
         first_page = [{"id": str(index)} for index in range(200)]
         second_page = [{"id": "200"}]
@@ -54,7 +67,7 @@ class ServerListFormattingTests(unittest.TestCase):
 
 
 class ServerCommandInteractionTests(unittest.TestCase):
-    def post_signed_command(self, user_id):
+    def post_signed_command(self, user_id, command="server", install_owner_id=None):
         signing_key = SigningKey.generate()
         timestamp = str(int(time.time()))
         payload = {
@@ -62,15 +75,22 @@ class ServerCommandInteractionTests(unittest.TestCase):
             "id": "interaction-id",
             "application_id": "application-id",
             "token": "interaction-token",
-            "data": {"name": "server"},
+            "data": {"name": command},
             "member": {"user": {"id": str(user_id)}},
         }
+        if install_owner_id is not None:
+            payload["authorizing_integration_owners"] = {
+                "1": str(install_owner_id),
+            }
         body = json.dumps(payload).encode()
         signature = signing_key.sign(timestamp.encode() + body).signature.hex()
 
         with patch.dict(
             os.environ,
-            {"DISCORD_PUBLIC_KEY": signing_key.verify_key.encode().hex()},
+            {
+                "DISCORD_PUBLIC_KEY": signing_key.verify_key.encode().hex(),
+                "DATABASE_URL": "postgresql://example/test",
+            },
         ):
             response = TestClient(app).post(
                 "/",
@@ -87,8 +107,10 @@ class ServerCommandInteractionTests(unittest.TestCase):
             response = self.post_signed_command(670920777926705185)
 
         self.assertEqual(response.json(), {"type": 5, "data": {"flags": 64}})
-        send.assert_awaited_once()
-        self.assertEqual(send.await_args.args[0], SERVER_LIST_TOPIC)
+        self.assertEqual(
+            [call.args[0] for call in send.await_args_list],
+            [SERVER_LIST_TOPIC],
+        )
 
     def test_non_owner_is_denied_privately_without_queueing(self):
         with patch("api.interactions.send", new_callable=AsyncMock) as send:
@@ -97,6 +119,52 @@ class ServerCommandInteractionTests(unittest.TestCase):
         self.assertEqual(response.json()["data"]["flags"], 64)
         self.assertIn("Only the bot owner", response.json()["data"]["content"])
         send.assert_not_awaited()
+
+    def test_user_install_owner_is_queued_for_tracking(self):
+        with patch("api.interactions.send", new_callable=AsyncMock) as send:
+            response = self.post_signed_command(
+                123,
+                command="ping",
+                install_owner_id=456,
+            )
+
+        self.assertEqual(response.json()["data"]["content"], "Pong! Sora10Chan is online.")
+        self.assertEqual(len(send.await_args_list), 1)
+        self.assertEqual(send.await_args.args[0], USER_INSTALL_TOPIC)
+        self.assertEqual(send.await_args.args[1], {"user_id": "456"})
+
+
+class PersonalInstallStorageTests(unittest.TestCase):
+    def test_records_user_id_with_idempotent_upsert(self):
+        with (
+            patch("install_tracking.get_database_url", return_value="postgresql://test"),
+            patch("install_tracking.psycopg.connect") as connect,
+        ):
+            record_personal_install_user("123456")
+
+        cursor = (
+            connect.return_value.__enter__.return_value
+            .cursor.return_value.__enter__.return_value
+        )
+        self.assertEqual(cursor.execute.call_count, 2)
+        self.assertIn("ON CONFLICT (user_id)", cursor.execute.call_args.args[0])
+        self.assertIn("DO NOTHING", cursor.execute.call_args.args[0])
+        self.assertEqual(cursor.execute.call_args.args[1], ("123456",))
+
+    def test_lists_only_stored_user_ids(self):
+        with (
+            patch("install_tracking.get_database_url", return_value="postgresql://test"),
+            patch("install_tracking.psycopg.connect") as connect,
+        ):
+            cursor = (
+                connect.return_value.__enter__.return_value
+                .cursor.return_value.__enter__.return_value
+            )
+            cursor.fetchall.return_value = [("123456",), ("654321",)]
+
+            user_ids = list_personal_install_users()
+
+        self.assertEqual(user_ids, ["123456", "654321"])
 
 
 if __name__ == "__main__":

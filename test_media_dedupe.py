@@ -38,8 +38,14 @@ class TikTokMediaExtractionTests(unittest.TestCase):
                     "https://cdn.tiktok.com/slide-video.mp4?mime_type=video_mp4",
                 ],
                 "images": [
-                    "https://cdn.tiktok.com/photo-1.jpeg",
-                    "https://cdn.tiktok.com/photo-2.jpeg",
+                    {
+                        "imageURL": {
+                            "urlList": [
+                                "https://cdn.tiktok.com/photo-1.jpeg",
+                            ],
+                        },
+                    },
+                    "https://cdn.tiktok.com/photo-2?image_type=photo",
                 ],
                 "cover": "https://cdn.tiktok.com/cover.webp",
                 "origin_cover": "https://cdn.tiktok.com/cover.webp",
@@ -91,6 +97,46 @@ class TikTokMediaExtractionTests(unittest.TestCase):
         self.assertEqual(download_video.call_count, 1)
         self.assertEqual(download_image.call_count, 2)
         self.assertFalse(any("cover" in path.name for path in media))
+
+    def test_download_tiktok_media_keeps_only_first_unwatermarked_video(self):
+        payload = {
+            "data": {
+                "play": "https://cdn.tiktok.com/without-watermark.mp4",
+                "hdplay": "https://cdn.tiktok.com/another-clean-copy.mp4",
+                "wmplay": "https://cdn.tiktok.com/with-watermark.mp4",
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            def save_video(_url, target_directory, filename):
+                path = Path(target_directory) / f"{filename}.mp4"
+                path.write_bytes(b"video")
+                return path
+
+            with (
+                patch.object(
+                    main,
+                    "urlopen",
+                    return_value=io.BytesIO(json.dumps(payload).encode()),
+                ),
+                patch.object(
+                    main,
+                    "download_instagram_video_url",
+                    side_effect=save_video,
+                ) as download_video,
+            ):
+                media = main.download_tiktok_media(
+                    "https://www.tiktok.com/@example/video/123",
+                    directory,
+                )
+
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].suffix, ".mp4")
+        download_video.assert_called_once_with(
+            "https://cdn.tiktok.com/without-watermark.mp4",
+            directory,
+            "tiktok-media-1",
+        )
 
 
 if __name__ == "__main__":

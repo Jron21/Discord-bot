@@ -3,7 +3,13 @@ import logging
 import os
 
 import requests
+import psycopg
 from vercel.queue import Message, subscribe
+
+from install_tracking import (
+    DatabaseNotConfiguredError,
+    list_personal_install_users,
+)
 
 
 logger = logging.getLogger("Sora10Chan.ServerList")
@@ -70,6 +76,26 @@ def format_guild_messages(guilds: list[dict]) -> list[str]:
     return messages
 
 
+def format_personal_install_messages(user_ids: list[str]) -> list[str]:
+    if not user_ids:
+        return [
+            "No users have been seen using a personal install yet. "
+            "Tracking starts when they use a command after setup."
+        ]
+
+    messages = []
+    lines = [f"Users seen using a personal install ({len(user_ids)}):"]
+    for user_id in user_ids:
+        line = f"<@{user_id}> (`{user_id}`)"
+        if len("\n".join(lines)) + len(line) + 1 > MESSAGE_LIMIT:
+            messages.append("\n".join(lines))
+            lines = ["More personal-install users:"]
+        lines.append(line)
+    if lines:
+        messages.append("\n".join(lines))
+    return messages
+
+
 def send_followup(application_id: str, interaction_token: str, content: str) -> None:
     response = requests.post(
         f"{DISCORD_API}/webhooks/{application_id}/{interaction_token}",
@@ -120,8 +146,22 @@ async def process_server_list(message: Message[dict[str, str]]) -> None:
         )
         return
 
+    messages = format_guild_messages(guilds)
     try:
-        for content in format_guild_messages(guilds):
+        user_ids = await asyncio.to_thread(list_personal_install_users)
+    except DatabaseNotConfiguredError:
+        messages.append(
+            "Personal-install tracking is not configured. Add DATABASE_URL "
+            "to the Vercel Production environment and redeploy."
+        )
+    except psycopg.Error:
+        logger.exception("Could not load personal-install users from the database")
+        messages.append("I couldn't load personal-install users; check the Vercel logs.")
+    else:
+        messages.extend(format_personal_install_messages(user_ids))
+
+    try:
+        for content in messages:
             await asyncio.to_thread(
                 send_followup,
                 application_id,

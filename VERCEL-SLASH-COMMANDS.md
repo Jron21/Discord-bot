@@ -58,11 +58,16 @@ that you used its deployment domain.
    ```text
    DISCORD_PUBLIC_KEY=<the application's Public Key>
    DISCORD_TOKEN=<the bot token>
+   DATABASE_URL=<Postgres connection URL>
    ```
 
    Paste the key as shown: do not add quotes or spaces. It is not the bot token
    or the application ID. The bot token is used by the server-list queue
-   subscriber to retrieve the bot's server list; keep it private.
+   subscriber to retrieve the bot's server list; keep it private. `DATABASE_URL`
+   connects to a persistent Postgres database for personal-install user
+   tracking; keep it private as well. Configure the same variable in the
+   always-on bot's environment if it should track interactions received by
+   `main.py`.
 4. Redeploy the production deployment so the function receives the new
    environment variable.
 
@@ -133,7 +138,12 @@ python register_vercel_commands.py
 ```
 
 For `/server`, make sure `DISCORD_TOKEN` or `DISCORD_BOT_TOKEN` is also
-configured in Vercel for the Production environment, then redeploy so the
-`queues.servers` subscriber is active. The `bot.tree.sync()` call in `main.py`
-belongs to the always-on bot deployment and is separate from this Vercel
-registration flow.
+configured in Vercel for the Production environment. To track personal
+installs, also configure `DATABASE_URL` with a persistent Postgres connection
+URL and redeploy. The bot records only the Discord user ID when Discord
+identifies a user-install owner in an interaction; `/server` lists users seen
+using personal installs after tracking is enabled. It cannot list people who
+installed the app but have never used it. The `queues.servers` and
+`queues.user_installs` subscribers must be active. The `bot.tree.sync()` call
+in `main.py` belongs to the always-on bot deployment and is separate from this
+Vercel registration flow.

@@ -15,6 +15,7 @@ from main import BOT_OWNER_ID, SOCIAL_MEDIA_URL_PATTERN
 app = FastAPI()
 MEDIA_TOPIC = "sora-social-media"
 SERVER_LIST_TOPIC = "sora-server-list"
+USER_INSTALL_TOPIC = "sora-user-install"
 PING = {"type": 1}
 logger = logging.getLogger("Sora10Chan.VercelInteractions")
 
@@ -75,6 +76,30 @@ async def interactions(request: Request) -> JSONResponse:
 
     data = payload.get("data") or {}
     command = data.get("name")
+    integration_owners = payload.get("authorizing_integration_owners") or {}
+    user_install_owner_id = integration_owners.get("1")
+    if user_install_owner_id is not None:
+        user_install_owner_id = str(user_install_owner_id)
+        if not user_install_owner_id.isdecimal():
+            logger.warning("Discord sent an invalid user-install owner ID")
+        elif not os.getenv("DATABASE_URL"):
+            logger.warning(
+                "Personal-install user was not recorded because DATABASE_URL "
+                "is not configured"
+            )
+        else:
+            try:
+                await send(
+                    USER_INSTALL_TOPIC,
+                    {"user_id": user_install_owner_id},
+                    delay=2,
+                    idempotency_key=f"{payload['id']}-user-install",
+                )
+            except Exception:
+                logger.exception(
+                    "Could not queue personal-install user tracking"
+                )
+
     if command == "ping":
         return interaction_response("Pong! Sora10Chan is online.")
     if command == "test":

@@ -17,9 +17,16 @@ from html.parser import HTMLParser
 from urllib.request import Request, urlopen
 
 import discord
+import psycopg
 from dotenv import load_dotenv
 from discord.ext import commands
 from yt_dlp import DownloadError, YoutubeDL
+
+from install_tracking import (
+    DatabaseNotConfiguredError,
+    list_personal_install_users,
+    record_personal_install_user,
+)
 
 try:
     import instaloader
@@ -500,6 +507,28 @@ def _is_image_tiktok_media_url(media_url: str) -> bool:
     return False
 
 
+def _tiktok_media_url_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        media_url = unescape(value).replace(r"\/", "/")
+        parsed_url = urlparse(media_url)
+        if parsed_url.scheme in ("http", "https") and parsed_url.netloc:
+            return [media_url]
+        return []
+    if isinstance(value, list):
+        return [
+            media_url
+            for item in value
+            for media_url in _tiktok_media_url_strings(item)
+        ]
+    if isinstance(value, dict):
+        return [
+            media_url
+            for item in value.values()
+            for media_url in _tiktok_media_url_strings(item)
+        ]
+    return []
+
+
 def download_tiktok_media(url: str, directory: str) -> list[Path]:
     """Download direct video or image media from a TikTok post or share link."""
     api_url = f"https://www.tikwm.com/api/?url={quote(url, safe='')}"
@@ -523,20 +552,15 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
     image_urls: list[str] = []
     cover_urls: list[str] = []
 
-    for key in ("live_images", "images"):
-        value = data.get(key)
-        if isinstance(value, str):
-            if _is_video_tiktok_media_url(value):
-                video_urls.append(value)
-            elif _is_image_tiktok_media_url(value):
-                image_urls.append(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    if _is_video_tiktok_media_url(item):
-                        video_urls.append(item)
-                    elif _is_image_tiktok_media_url(item):
-                        image_urls.append(item)
+    for media_url in _tiktok_media_url_strings(data.get("live_images")):
+        if _is_video_tiktok_media_url(media_url):
+            video_urls.append(media_url)
+        elif _is_image_tiktok_media_url(media_url):
+            image_urls.append(media_url)
+
+    for media_url in _tiktok_media_url_strings(data.get("images")):
+        if not _is_video_tiktok_media_url(media_url):
+            image_urls.append(media_url)
 
     for key in ("cover", "origin_cover", "ai_dynamic_cover"):
         value = data.get(key)
@@ -546,33 +570,22 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
     for key in (
         "play",
         "hdplay",
-        "wmplay",
         "playAddr",
         "play_url",
         "video",
         "video_url",
-        "download",
-        "download_url",
-        "downloadAddr",
     ):
-        value = data.get(key)
-        if isinstance(value, str):
-            if _is_video_tiktok_media_url(value):
-                video_urls.append(value)
-            elif _is_image_tiktok_media_url(value):
-                image_urls.append(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, str):
-                    if _is_video_tiktok_media_url(item):
-                        video_urls.append(item)
-                    elif _is_image_tiktok_media_url(item):
-                        image_urls.append(item)
+        for media_url in _tiktok_media_url_strings(data.get(key)):
+            if _is_video_tiktok_media_url(media_url):
+                video_urls.append(media_url)
+            elif _is_image_tiktok_media_url(media_url):
+                image_urls.append(media_url)
 
     paths: list[Path] = []
     for media_urls, label in ((video_urls, "video"), (image_urls, "image")):
         seen_urls: set[str] = set()
-        for media_index, media_url in enumerate(dict.fromkeys(media_urls), start=1):
+        unique_media_urls = list(dict.fromkeys(media_urls))
+        for media_index, media_url in enumerate(unique_media_urls, start=1):
             if media_url in seen_urls:
                 continue
             seen_urls.add(media_url)
@@ -584,6 +597,8 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
 
             if media_path is not None:
                 paths.append(media_path)
+                if label == "video":
+                    break
 
     deduped_paths = dedupe_media_paths(paths)
     if deduped_paths:
@@ -623,7 +638,9 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     except (OSError, UnicodeError, json.JSONDecodeError):
         payload = {}
 
-    api_images = (payload.get("data") or {}).get("images") or []
+    api_images = _tiktok_media_url_strings(
+        (payload.get("data") or {}).get("images")
+    )
     paths = []
     for image_index, image_url in enumerate(api_images, start=1):
         image_path = download_image_url(
@@ -648,9 +665,16 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
 
     image_urls = re.findall(
         r'"(?:imageURL|image_url|display_image|originCover)"\s*:\s*'
-        r'"((?:\\.|[^"\\])+)',
+        r'(?:"((?:\\.|[^"\\])+)")',
         page,
         re.IGNORECASE,
+    )
+    image_urls.extend(
+        re.findall(
+            r'"url[_-]?list"\s*:\s*\[\s*"((?:\\.|[^"\\])+)',
+            page,
+            re.IGNORECASE,
+        )
     )
     image_urls.extend(
         re.findall(
@@ -1536,6 +1560,27 @@ async def on_ready():
         logger.exception("Discord slash command registration failed")
 
 
+@bot.listen("on_interaction")
+async def track_personal_install_user(interaction: discord.Interaction):
+    if not interaction.is_user_integration():
+        return
+
+    if not os.getenv("DATABASE_URL"):
+        logger.warning(
+            "Personal-install user was not recorded because DATABASE_URL "
+            "is not configured"
+        )
+        return
+
+    try:
+        await asyncio.to_thread(
+            record_personal_install_user,
+            str(interaction.user.id),
+        )
+    except (DatabaseNotConfiguredError, psycopg.Error, ValueError):
+        logger.exception("Could not record personal-install user")
+
+
 @bot.event
 async def on_voice_state_update(
     member: discord.Member,
@@ -1715,35 +1760,67 @@ async def server(interaction: discord.Interaction):
         )
         return
 
-    guilds = bot.guilds
-    if not guilds:
-        await interaction.response.send_message(
-            "Sora10Chan is not currently in any servers.",
-            ephemeral=True,
-        )
-        return
-
     embeds = []
-    for page_start in range(0, len(guilds), 20):
-        page_guilds = guilds[page_start:page_start + 20]
-        page_number = page_start // 20 + 1
-        page_count = (len(guilds) + 19) // 20
-        embed = discord.Embed(
-            title=f"Servers using Sora10Chan ({len(guilds)})",
-            description=f"Page {page_number} of {page_count}",
-        )
-        for guild in page_guilds:
-            member_count = (
-                str(guild.member_count)
-                if guild.member_count is not None
-                else "Unknown"
+    guilds = bot.guilds
+    if guilds:
+        for page_start in range(0, len(guilds), 20):
+            page_guilds = guilds[page_start:page_start + 20]
+            page_number = page_start // 20 + 1
+            page_count = (len(guilds) + 19) // 20
+            embed = discord.Embed(
+                title=f"Servers using Sora10Chan ({len(guilds)})",
+                description=f"Page {page_number} of {page_count}",
             )
-            embed.add_field(
-                name=guild.name,
-                value=f"ID: `{guild.id}` | Members: {member_count}",
-                inline=False,
-            )
-        embeds.append(embed)
+            for guild in page_guilds:
+                member_count = (
+                    str(guild.member_count)
+                    if guild.member_count is not None
+                    else "Unknown"
+                )
+                embed.add_field(
+                    name=guild.name,
+                    value=f"ID: `{guild.id}` | Members: {member_count}",
+                    inline=False,
+                )
+            embeds.append(embed)
+    else:
+        embeds.append(discord.Embed(
+            title="Servers using Sora10Chan (0)",
+            description="Sora10Chan is not currently in any servers.",
+        ))
+
+    try:
+        user_ids = await asyncio.to_thread(list_personal_install_users)
+    except DatabaseNotConfiguredError:
+        user_pages = [[
+            "Personal-install tracking is not configured. Add DATABASE_URL "
+            "to the bot's environment.",
+        ]]
+        user_count = "unavailable"
+    except psycopg.Error:
+        logger.exception("Could not load personal-install users")
+        user_pages = [["I couldn't load personal-install users; check the logs."]]
+        user_count = "unavailable"
+    else:
+        user_pages = [
+            [
+                f"<@{user_id}> (`{user_id}`)"
+                for user_id in user_ids[page_start:page_start + 20]
+            ]
+            for page_start in range(0, len(user_ids), 20)
+        ]
+        if not user_pages:
+            user_pages = [[
+                "No users have been seen using a personal install yet. "
+                "Tracking starts when they use a command after setup.",
+            ]]
+        user_count = str(len(user_ids))
+
+    for user_page in user_pages:
+        embeds.append(discord.Embed(
+            title=f"Users seen using a personal install ({user_count})",
+            description="\n".join(user_page),
+        ))
 
     await interaction.response.send_message(embeds=[embeds[0]], ephemeral=True)
     for embed in embeds[1:]:
