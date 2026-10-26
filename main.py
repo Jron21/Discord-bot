@@ -548,19 +548,56 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
 
     data = payload.get("data") or {}
 
+    live_video_urls: list[str] = []
+    video_fallback_images: dict[str, list[str]] = {}
     video_urls: list[str] = []
     image_urls: list[str] = []
     cover_urls: list[str] = []
 
-    for media_url in _tiktok_media_url_strings(data.get("live_images")):
-        if _is_video_tiktok_media_url(media_url):
-            video_urls.append(media_url)
-        elif _is_image_tiktok_media_url(media_url):
-            image_urls.append(media_url)
+    live_image_items = data.get("live_images")
+    image_items = data.get("images")
+    if (
+        isinstance(live_image_items, list)
+        and isinstance(image_items, list)
+        and len(live_image_items) == len(image_items)
+    ):
+        for live_item, image_item in zip(live_image_items, image_items):
+            live_item_urls = _tiktok_media_url_strings(live_item)
+            slide_video_urls = [
+                media_url
+                for media_url in live_item_urls
+                if _is_video_tiktok_media_url(media_url)
+            ]
+            slide_image_urls = [
+                media_url
+                for media_url in _tiktok_media_url_strings(image_item)
+                if not _is_video_tiktok_media_url(media_url)
+            ]
+            if slide_video_urls:
+                live_video_urls.extend(slide_video_urls)
+                for media_url in slide_video_urls:
+                    video_fallback_images.setdefault(media_url, []).extend(
+                        slide_image_urls
+                    )
+            else:
+                image_urls.extend(slide_image_urls)
+                image_urls.extend(
+                    media_url
+                    for media_url in live_item_urls
+                    if not _is_video_tiktok_media_url(media_url)
+                )
+    else:
+        for media_url in _tiktok_media_url_strings(live_image_items):
+            if _is_video_tiktok_media_url(media_url):
+                live_video_urls.append(media_url)
+            elif _is_image_tiktok_media_url(media_url):
+                image_urls.append(media_url)
 
-    for media_url in _tiktok_media_url_strings(data.get("images")):
-        if not _is_video_tiktok_media_url(media_url):
-            image_urls.append(media_url)
+        image_urls.extend(
+            media_url
+            for media_url in _tiktok_media_url_strings(image_items)
+            if not _is_video_tiktok_media_url(media_url)
+        )
 
     for key in ("cover", "origin_cover", "ai_dynamic_cover"):
         value = data.get(key)
@@ -582,23 +619,39 @@ def download_tiktok_media(url: str, directory: str) -> list[Path]:
                 image_urls.append(media_url)
 
     paths: list[Path] = []
-    for media_urls, label in ((video_urls, "video"), (image_urls, "image")):
-        seen_urls: set[str] = set()
-        unique_media_urls = list(dict.fromkeys(media_urls))
-        for media_index, media_url in enumerate(unique_media_urls, start=1):
-            if media_url in seen_urls:
+    unique_live_video_urls = list(dict.fromkeys(live_video_urls))
+    for media_index, media_url in enumerate(unique_live_video_urls, start=1):
+        media_path = download_instagram_video_url(
+            media_url,
+            directory,
+            f"tiktok-live-slide-{media_index}",
+        )
+        if media_path is not None:
+            paths.append(media_path)
+        else:
+            image_urls.extend(video_fallback_images.get(media_url, []))
+
+    if not unique_live_video_urls:
+        for media_index, media_url in enumerate(dict.fromkeys(video_urls), start=1):
+            if not _is_video_tiktok_media_url(media_url):
                 continue
-            seen_urls.add(media_url)
-
-            if label == "video" or re.search(r"(?:\.mp4|\.mov|\.webm)(?:\?|$)", media_url, re.IGNORECASE):
-                media_path = download_instagram_video_url(media_url, directory, f"tiktok-media-{media_index}")
-            else:
-                media_path = download_image_url(media_url, directory, f"tiktok-media-{media_index}")
-
+            media_path = download_instagram_video_url(
+                media_url,
+                directory,
+                f"tiktok-media-{media_index}",
+            )
             if media_path is not None:
                 paths.append(media_path)
-                if label == "video":
-                    break
+                break
+
+    for media_index, media_url in enumerate(dict.fromkeys(image_urls), start=1):
+        media_path = download_image_url(
+            media_url,
+            directory,
+            f"tiktok-media-image-{media_index}",
+        )
+        if media_path is not None:
+            paths.append(media_path)
 
     deduped_paths = dedupe_media_paths(paths)
     if deduped_paths:

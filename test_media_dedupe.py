@@ -31,6 +31,52 @@ class MediaDeduplicationTests(unittest.TestCase):
 
 
 class TikTokMediaExtractionTests(unittest.TestCase):
+    def test_download_tiktok_media_keeps_each_animated_photo_slide(self):
+        payload = {
+            "data": {
+                "live_images": [
+                    f"https://cdn.tiktok.com/slide-{index}?mime_type=video_mp4"
+                    for index in range(5)
+                ],
+                "images": [
+                    f"https://cdn.tiktok.com/slide-{index}.jpeg"
+                    for index in range(5)
+                ],
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            def save_video(_url, target_directory, filename):
+                path = Path(target_directory) / f"{filename}.mp4"
+                path.write_bytes(filename.encode())
+                return path
+
+            with (
+                patch.object(
+                    main,
+                    "urlopen",
+                    return_value=io.BytesIO(json.dumps(payload).encode()),
+                ),
+                patch.object(
+                    main,
+                    "download_instagram_video_url",
+                    side_effect=save_video,
+                ) as download_video,
+                patch.object(
+                    main,
+                    "download_image_url",
+                ) as download_image,
+            ):
+                media = main.download_tiktok_media(
+                    "https://vt.tiktok.com/ZSgXT5Vt4/",
+                    directory,
+                )
+
+        self.assertEqual(len(media), 5)
+        self.assertTrue(all(path.suffix == ".mp4" for path in media))
+        self.assertEqual(download_video.call_count, 5)
+        download_image.assert_not_called()
+
     def test_download_tiktok_media_keeps_images_with_video_slides(self):
         payload = {
             "data": {
