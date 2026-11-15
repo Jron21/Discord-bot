@@ -920,22 +920,42 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         "scontent",
         "srcset",
         "video_versions",
+        "__additionalDataLoaded",
+        "require_login",
+        "login_and_signup_page",
+        "graphql",
+        "instagram",
     ]
 
     for index, page in enumerate(pages, start=1):
         logger.info("========== INSTAGRAM PAGE %s ==========", index)
+        logger.info("HTML length: %s", len(page))
 
+        keyword_summary = []
         for keyword in keywords:
             count = page.lower().count(keyword.lower())
-
             logger.info("%s: %s occurrences", keyword, count)
+            keyword_summary.append(f"{keyword}={count}")
 
-        with open(
-            f"instagram_debug_{index}.html",
-            "w",
-            encoding="utf-8",
-        ) as file:
-            file.write(page)
+        logger.info("Instagram keyword summary: %s", ", ".join(keyword_summary))
+
+        html_sample = page[:1500]
+        html_sample = re.sub(
+            r'(?i)((?:sessionid|csrftoken|csrf_token|access_token|authorization|'
+            r'fb_dtsg|lsd|token)["\']?\s*[:=]\s*["\']?)[^"\'&,\s}]+',
+            r"\1[REDACTED]",
+            html_sample,
+        )
+        html_sample = re.sub(
+            r"""https?:\\?/\\?/[^"'\s<>]+""",
+            "[URL REDACTED]",
+            html_sample,
+            flags=re.IGNORECASE,
+        ).replace("\n", " ")
+        logger.info(
+            "HTML beginning (first 1500 characters, sanitized): %s",
+            html_sample,
+        )
 
     logger.info("Instagram HTML diagnostic completed.")
 
