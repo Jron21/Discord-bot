@@ -30,6 +30,97 @@ class MediaDeduplicationTests(unittest.TestCase):
             self.assertIn(file_c, deduped)
 
 
+class InstagramMediaExtractionTests(unittest.TestCase):
+    def test_extract_instagram_urls_separates_full_images_from_previews(self):
+        full_url = "https://scontent.cdninstagram.com/full-image.jpg"
+        preview_url = "https://scontent.cdninstagram.com/preview.jpg"
+        page = (
+            json.dumps({"display_url": full_url})
+            + f'<meta property="og:image" content="{preview_url}">'
+        )
+
+        full_urls, preview_urls = main.extract_instagram_image_urls(page)
+
+        self.assertEqual(full_urls, [full_url])
+        self.assertEqual(preview_urls, [preview_url])
+
+    def test_indexed_carousel_does_not_download_preview_only_metadata(self):
+        preview_url = "https://scontent.cdninstagram.com/preview.jpg"
+        page = f'<meta property="og:image" content="{preview_url}">'
+
+        with (
+            patch.object(
+                main,
+                "urlopen",
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(page.encode()),
+            ),
+            patch.object(main, "download_instagram_sidecar_media", return_value=[]),
+            patch.object(main, "download_image_url") as download_image,
+        ):
+            media = main.download_instagram_media(
+                "https://www.instagram.com/p/example/?img_index=2",
+                ".",
+            )
+
+        self.assertEqual(media, [])
+        download_image.assert_not_called()
+
+    def test_indexed_carousel_downloads_all_display_urls(self):
+        image_urls = [
+            f"https://scontent.cdninstagram.com/full-{index}.jpg"
+            for index in range(1, 4)
+        ]
+        page = json.dumps({
+            "items": [{"display_url": image_url} for image_url in image_urls],
+        })
+
+        with tempfile.TemporaryDirectory() as directory:
+            def save_image(image_url, target_directory, filename):
+                path = Path(target_directory) / f"{filename}.jpg"
+                path.write_bytes(image_url.encode())
+                return path
+
+            with (
+                patch.object(
+                    main,
+                    "urlopen",
+                    side_effect=lambda *_args, **_kwargs: io.BytesIO(page.encode()),
+                ),
+                patch.object(main, "download_instagram_sidecar_media", return_value=[]),
+                patch.object(main, "download_image_url", side_effect=save_image),
+            ):
+                media = main.download_instagram_media(
+                    "https://www.instagram.com/p/example/?img_index=3",
+                    directory,
+                )
+            media_contents = [path.read_bytes().decode() for path in media]
+
+        self.assertEqual(len(media), len(image_urls))
+        self.assertEqual(media_contents, image_urls)
+
+    def test_instagram_http_errors_are_logged_without_query_tokens(self):
+        error = main.HTTPError(
+            "https://www.instagram.com/p/example/",
+            401,
+            "Unauthorized",
+            None,
+            None,
+        )
+
+        with (
+            patch.object(main, "urlopen", side_effect=error),
+            self.assertLogs(main.logger, level="WARNING") as captured,
+        ):
+            media = main.download_instagram_media(
+                "https://www.instagram.com/p/example/?img_index=2&stkn=secret-token",
+                ".",
+            )
+
+        self.assertEqual(media, [])
+        self.assertIn("Instagram HTTP error 401", "\n".join(captured.output))
+        self.assertNotIn("secret-token", "\n".join(captured.output))
+
+
 class TikTokMediaExtractionTests(unittest.TestCase):
     def test_download_tiktok_media_keeps_each_animated_photo_slide(self):
         payload = {

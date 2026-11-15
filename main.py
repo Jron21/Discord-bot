@@ -12,6 +12,7 @@ import re
 import shutil
 import tempfile
 import time
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 from html.parser import HTMLParser
 from urllib.request import Request, urlopen
@@ -760,6 +761,56 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     return dedupe_media_paths(paths)
 
 
+def extract_instagram_image_urls(page: str) -> tuple[list[str], list[str]]:
+    """Return full image metadata URLs and preview URLs separately."""
+    full_urls = re.findall(
+        r'display_url\\?"\s*:\s*\\?"(https:[^"]+)',
+        page,
+        re.IGNORECASE,
+    )
+
+    preview_urls = []
+    preview_patterns = [
+        r'EmbeddedMediaImage[^>]*?src=["\']([^"\']+)',
+        r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)',
+    ]
+    for pattern in preview_patterns:
+        preview_urls.extend(re.findall(pattern, page, re.IGNORECASE))
+
+    def clean_urls(urls: list[str]) -> list[str]:
+        cleaned_urls = []
+        for image_url in urls:
+            cleaned = (
+                unescape(image_url)
+                .replace(r"\/", "/")
+                .replace(r"\u0026", "&")
+                .replace(r"\u00253D", "%3D")
+                .replace("&amp;", "&")
+                .replace("\\", "")
+            )
+            parsed_url = urlparse(cleaned)
+            hostname = (parsed_url.hostname or "").lower()
+            is_instagram_cdn = (
+                hostname == "cdninstagram.com"
+                or hostname.endswith(".cdninstagram.com")
+                or hostname == "fbcdn.net"
+                or hostname.endswith(".fbcdn.net")
+            )
+            if (
+                parsed_url.scheme.lower() == "https"
+                and is_instagram_cdn
+                and re.search(
+                    r"\.(?:jpe?g|png|webp|avif)(?:\?|$)",
+                    cleaned,
+                    re.IGNORECASE,
+                )
+            ):
+                cleaned_urls.append(cleaned)
+        return list(dict.fromkeys(cleaned_urls))
+
+    return clean_urls(full_urls), clean_urls(preview_urls)
+
+
 def download_instagram_media(url: str, directory: str) -> list[Path]:
     """Download media exposed by an Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
@@ -769,6 +820,9 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
     shortcode = match.group(1)
     parsed_url = urlparse(url)
     query_params = parse_qs(parsed_url.query)
+    has_carousel_index = any(
+        key in query_params for key in ("img_index", "index")
+    )
     img_index_values = []
     for key in ("img_index", "index"):
         values = query_params.get(key, [])
@@ -788,14 +842,64 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
         *extra_page_urls,
     ]
+    headers = {
+        "User-Agent": BROWSER_USER_AGENT,
+        "Accept": (
+            "text/html,application/xhtml+xml,application/xml;q=0.9,"
+            "image/avif,image/webp,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
     pages = []
     for page_url in dict.fromkeys(page_urls):
-        request = Request(page_url, headers={"User-Agent": "Mozilla/5.0"})
+        safe_page_url = urlparse(page_url)._replace(
+            query="",
+            fragment="",
+        ).geturl()
+        request = Request(page_url, headers=headers)
         try:
             with urlopen(request, timeout=30) as response:
-                pages.append(response.read().decode("utf-8", errors="ignore"))
-        except OSError:
-            continue
+                page = response.read().decode("utf-8", errors="ignore")
+                pages.append(page)
+                logger.info(
+                    "Instagram page fetched: %s | HTTP %s | %s characters",
+                    safe_page_url,
+                    getattr(response, "status", "unknown"),
+                    len(page),
+                )
+                logger.info(
+                    "Instagram response diagnostics: "
+                    "display_url=%s, graphql=%s, login_page=%s",
+                    "display_url" in page,
+                    "graphql" in page,
+                    "login" in page.lower(),
+                )
+        except HTTPError as exc:
+            logger.warning(
+                "Instagram HTTP error %s for %s",
+                exc.code,
+                safe_page_url,
+            )
+        except URLError as exc:
+            logger.warning(
+                "Instagram connection error for %s: %s",
+                safe_page_url,
+                exc.reason,
+            )
+        except OSError as exc:
+            logger.warning(
+                "Instagram request failed for %s: %s",
+                safe_page_url,
+                exc,
+            )
+        except UnicodeError as exc:
+            logger.warning(
+                "Instagram response could not be decoded for %s: %s",
+                safe_page_url,
+                exc,
+            )
 
     if not pages:
         return []
@@ -805,54 +909,16 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         return sidecar_paths
 
     image_urls = []
+    preview_urls = []
     for page in pages:
-        embedded_image_urls = re.findall(
-            r'EmbeddedMediaImage[^>]*?src=["\']([^"\']+)',
-            page,
-            re.IGNORECASE,
-        )
-        escaped_image_urls = []
-        search_position = 0
-        while True:
-            marker_position = page.lower().find("display_url", search_position)
-            if marker_position < 0:
-                break
+        full_urls, page_preview_urls = extract_instagram_image_urls(page)
+        image_urls.extend(full_urls)
+        preview_urls.extend(page_preview_urls)
 
-            url_start = page.find("https:", marker_position)
-            next_field = page.find("display_resources", url_start)
-            next_display = page.lower().find("display_url", url_start)
-            field_positions = [position for position in (next_field, next_display) if position >= 0]
-            next_field = min(field_positions) if field_positions else len(page)
-            if url_start >= 0:
-                escaped_image_urls.append(page[url_start:next_field].rstrip('\\",'))
-            search_position = marker_position + len("display_url")
+    unique_urls = list(dict.fromkeys(image_urls))
+    if not unique_urls and not has_carousel_index:
+        unique_urls = list(dict.fromkeys(preview_urls))
 
-        meta_image_urls = re.findall(
-            r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]+content=["\']([^"\']+)',
-            page,
-            re.IGNORECASE,
-        )
-
-        image_urls.extend(embedded_image_urls)
-        image_urls.extend(escaped_image_urls)
-        image_urls.extend(meta_image_urls)
-
-    cleaned_urls = []
-    for image_url in image_urls:
-        cleaned = (
-            unescape(image_url)
-            .replace(r"\/", "/")
-            .replace(r"\u0026", "&")
-            .replace(r"\u00253D", "%3D")
-            .replace("&amp;", "&")
-            .replace("\\", "")
-        )
-        if re.search(r"\.(?:jpe?g|png|webp|avif)(?:\?|$)", cleaned, re.IGNORECASE) and (
-            "cdninstagram" in cleaned or "scontent" in cleaned or "fbcdn" in cleaned
-        ):
-            cleaned_urls.append(cleaned)
-
-    unique_urls = list(dict.fromkeys(cleaned_urls))
     paths = []
     content_hashes: set[bytes] = set()
     for image_index, image_url in enumerate(unique_urls, start=1):
@@ -875,14 +941,10 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
     if paths:
         return dedupe_media_paths(paths)
 
-    og_image = download_open_graph_image(url, directory)
-    if og_image is not None:
-        return dedupe_media_paths([og_image])
-
-    public_page_image = download_open_graph_image(f"https://www.instagram.com/p/{shortcode}/", directory)
-    if public_page_image is not None:
-        return dedupe_media_paths([public_page_image])
-
+    logger.warning(
+        "No full Instagram image metadata found for %s",
+        shortcode,
+    )
     return []
 
 
