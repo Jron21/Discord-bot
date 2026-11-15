@@ -12,10 +12,11 @@ import re
 import shutil
 import tempfile
 import time
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from html.parser import HTMLParser
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 import discord
 import psycopg
@@ -812,206 +813,246 @@ def extract_instagram_image_urls(page: str) -> tuple[list[str], list[str]]:
 
 
 def download_instagram_media(url: str, directory: str) -> list[Path]:
-    """Download media exposed by an Instagram post or carousel."""
+    """Download all available media from a public Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
     if match is None:
+        logger.warning("Invalid Instagram post URL")
         return []
 
     shortcode = match.group(1)
-    parsed_url = urlparse(url)
-    query_params = parse_qs(parsed_url.query)
-    has_carousel_index = any(
-        key in query_params for key in ("img_index", "index")
+    instagram_home = "https://www.instagram.com/"
+    graphql_url = "https://www.instagram.com/graphql/query"
+    app_id = "936619743392459"
+    doc_id = "27128499623469141"
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
     )
-    img_index_values = []
-    for key in ("img_index", "index"):
-        values = query_params.get(key, [])
-        for value in values:
-            try:
-                img_index_values.append(int(value))
-            except ValueError:
-                continue
 
-    extra_page_urls: list[str] = []
-    if img_index_values:
-        for index in range(1, max(img_index_values) + 2):
-            extra_page_urls.append(f"https://www.instagram.com/p/{shortcode}/?img_index={index}&stkn={query_params.get('stkn', [''])[0]}")
-
-    page_urls = [
-        f"https://www.instagram.com/p/{shortcode}/",
-        f"https://www.instagram.com/p/{shortcode}/embed/captioned/",
-        *extra_page_urls,
-    ]
     headers = {
-        "User-Agent": BROWSER_USER_AGENT,
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,*/*;q=0.8"
-        ),
+        "User-Agent": user_agent,
+        "Accept": "*/*",
         "Accept-Language": "en-US,en;q=0.9",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache",
+        "Origin": instagram_home.rstrip("/"),
+        "Referer": instagram_home,
+        "X-IG-App-ID": app_id,
+        "X-Requested-With": "XMLHttpRequest",
     }
-    pages = []
-    for page_url in dict.fromkeys(page_urls):
-        safe_page_url = urlparse(page_url)._replace(
-            query="",
-            fragment="",
-        ).geturl()
-        request = Request(page_url, headers=headers)
-        try:
-            with urlopen(request, timeout=30) as response:
-                page = response.read().decode("utf-8", errors="ignore")
-                pages.append(page)
-                logger.info(
-                    "Instagram page fetched: %s | HTTP %s | %s characters",
-                    safe_page_url,
-                    getattr(response, "status", "unknown"),
-                    len(page),
-                )
-                lower_page = page.lower()
-                logger.info(
-                    "Instagram HTML inspection for %s: "
-                    "display_url=%s, og:image=%s, EmbeddedMediaImage=%s, "
-                    "login_and_signup_page=%s, require_login=%s, "
-                    "carousel_metadata=%s",
-                    safe_page_url,
-                    "display_url" in lower_page,
-                    "og:image" in lower_page,
-                    "embeddedmediaimage" in lower_page,
-                    "login_and_signup_page" in lower_page,
-                    "require_login" in lower_page,
-                    "edge_sidecar_to_children" in lower_page,
-                )
-        except HTTPError as exc:
-            logger.warning(
-                "Instagram HTTP error %s for %s",
-                exc.code,
-                safe_page_url,
-            )
-        except URLError as exc:
-            logger.warning(
-                "Instagram connection error for %s: %s",
-                safe_page_url,
-                exc.reason,
-            )
-        except OSError as exc:
-            logger.warning(
-                "Instagram request failed for %s: %s",
-                safe_page_url,
-                exc,
-            )
-        except UnicodeError as exc:
-            logger.warning(
-                "Instagram response could not be decoded for %s: %s",
-                safe_page_url,
-                exc,
-            )
 
-    # DEBUG: Inspect Instagram HTML for image metadata
-    keywords = [
-        "display_url",
-        "display_resources",
-        "image_versions2",
-        "carousel_media",
-        "edge_sidecar_to_children",
-        "xdt_shortcode_media",
-        "og:image",
-        "scontent",
-        "srcset",
-        "video_versions",
-        "__additionalDataLoaded",
-        "require_login",
-        "login_and_signup_page",
-        "graphql",
-        "instagram",
-    ]
+    cookie_jar = CookieJar()
+    opener = build_opener(HTTPCookieProcessor(cookie_jar))
 
-    for index, page in enumerate(pages, start=1):
-        logger.info("========== INSTAGRAM PAGE %s ==========", index)
-        logger.info("HTML length: %s", len(page))
-
-        keyword_summary = []
-        for keyword in keywords:
-            count = page.lower().count(keyword.lower())
-            logger.info("%s: %s occurrences", keyword, count)
-            keyword_summary.append(f"{keyword}={count}")
-
-        logger.info("Instagram keyword summary: %s", ", ".join(keyword_summary))
-
-        html_sample = page[:1500]
-        html_sample = re.sub(
-            r'(?i)((?:sessionid|csrftoken|csrf_token|access_token|authorization|'
-            r'fb_dtsg|lsd|token)["\']?\s*[:=]\s*["\']?)[^"\'&,\s}]+',
-            r"\1[REDACTED]",
-            html_sample,
+    try:
+        home_request = Request(
+            instagram_home,
+            headers={
+                "User-Agent": user_agent,
+                "Accept": "text/html,application/xhtml+xml",
+            },
         )
-        html_sample = re.sub(
-            r"""https?:\\?/\\?/[^"'\s<>]+""",
-            "[URL REDACTED]",
-            html_sample,
-            flags=re.IGNORECASE,
-        ).replace("\n", " ")
-        logger.info(
-            "HTML beginning (first 1500 characters, sanitized): %s",
-            html_sample,
+        with opener.open(home_request, timeout=30) as response:
+            response.read(1024)
+
+        csrf_token = next(
+            (
+                cookie.value
+                for cookie in cookie_jar
+                if cookie.name == "csrftoken"
+            ),
+            None,
+        )
+        if not csrf_token:
+            logger.warning(
+                "Instagram did not provide a CSRF token for %s",
+                shortcode,
+            )
+            return []
+
+        variables = {
+            "shortcode": shortcode,
+            "__relay_internal__pv__PolarisAIGMMediaWebLabelEnabledrelayprovider": False,
+        }
+        payload = urlencode({
+            "doc_id": doc_id,
+            "variables": json.dumps(variables, separators=(",", ":")),
+            "server_timestamps": "true",
+        }).encode("utf-8")
+        graphql_request = Request(
+            graphql_url,
+            data=payload,
+            headers={
+                **headers,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "X-CSRFToken": csrf_token,
+            },
+            method="POST",
         )
 
-    logger.info("Instagram HTML diagnostic completed.")
-
-    if not pages:
-        return []
-
-    sidecar_paths = download_instagram_sidecar_media(url, directory)
-    if sidecar_paths:
-        return sidecar_paths
-
-    full_image_urls = []
-    preview_urls = []
-    for page in pages:
-        full_urls, page_preview_urls = extract_instagram_image_urls(page)
-        full_image_urls.extend(full_urls)
-        preview_urls.extend(page_preview_urls)
-
-    if has_carousel_index and not full_image_urls:
+        with opener.open(graphql_request, timeout=30) as response:
+            response_data = json.loads(
+                response.read().decode("utf-8", errors="replace")
+            )
+    except HTTPError as exc:
         logger.warning(
-            "No full carousel image metadata found for %s. "
-            "Skipping preview fallback.",
+            "Instagram GraphQL request returned HTTP %s for %s",
+            exc.code,
             shortcode,
         )
         return []
-
-    unique_urls = list(dict.fromkeys(full_image_urls))
-    if not full_image_urls and not has_carousel_index:
-        unique_urls = list(dict.fromkeys(preview_urls))
-
-    paths = []
-    content_hashes: set[bytes] = set()
-    for image_index, image_url in enumerate(unique_urls, start=1):
-        image_path = download_image_url(
-            image_url,
-            directory,
-            f"instagram-{shortcode}-{image_index}",
+    except URLError as exc:
+        logger.warning(
+            "Instagram GraphQL connection failed for %s: %s",
+            shortcode,
+            exc.reason,
         )
-        if image_path is None:
-            continue
+        return []
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Instagram GraphQL request failed for %s: %s",
+            shortcode,
+            exc,
+        )
+        return []
 
-        digest = sha256_file(image_path)
-        if digest in content_hashes:
-            image_path.unlink(missing_ok=True)
-            continue
+    if not isinstance(response_data, dict):
+        logger.warning("Instagram returned an invalid response for %s", shortcode)
+        return []
 
-        content_hashes.add(digest)
-        paths.append(image_path)
-
-    if paths:
-        return dedupe_media_paths(paths)
-
-    logger.warning(
-        "No full Instagram image metadata found for %s",
-        shortcode,
+    data = response_data.get("data")
+    media_container = (
+        data.get("xdt_api__v1__media__shortcode__web_info")
+        if isinstance(data, dict)
+        else None
     )
-    return []
+    items = (
+        media_container.get("items")
+        if isinstance(media_container, dict)
+        else None
+    )
+    if not isinstance(items, list) or not items or not isinstance(items[0], dict):
+        logger.warning(
+            "Instagram returned no media items for %s. Response keys: %s",
+            shortcode,
+            list(response_data.keys()),
+        )
+        return []
+
+    post = items[0]
+    carousel_media = post.get("carousel_media")
+    media_items = (
+        carousel_media
+        if isinstance(carousel_media, list) and carousel_media
+        else [post]
+    )
+    logger.info(
+        "Instagram extraction started for %s: %s media items",
+        shortcode,
+        len(media_items),
+    )
+
+    def candidate_quality(candidate: dict) -> tuple[int, int, int]:
+        width = candidate.get("width")
+        height = candidate.get("height")
+        candidate_type = candidate.get("type")
+        width = width if isinstance(width, int) and width > 0 else 0
+        height = height if isinstance(height, int) and height > 0 else 0
+        candidate_type = (
+            candidate_type
+            if isinstance(candidate_type, int) and candidate_type > 0
+            else 0
+        )
+        return width * height, width, candidate_type
+
+    paths: list[Path] = []
+    content_hashes: set[bytes] = set()
+
+    for image_index, media_item in enumerate(media_items, start=1):
+        if not isinstance(media_item, dict):
+            logger.warning(
+                "Invalid Instagram media item %s for %s",
+                image_index,
+                shortcode,
+            )
+            continue
+
+        is_video = (
+            media_item.get("media_type") == 2
+            or media_item.get("is_video") is True
+        )
+        filename = f"instagram-{shortcode}-{image_index}"
+
+        if is_video:
+            candidates = media_item.get("video_versions")
+        else:
+            image_versions = media_item.get("image_versions2")
+            candidates = (
+                image_versions.get("candidates")
+                if isinstance(image_versions, dict)
+                else None
+            )
+
+        valid_candidates = (
+            [candidate for candidate in candidates if isinstance(candidate, dict)]
+            if isinstance(candidates, list)
+            else []
+        )
+        if not valid_candidates:
+            logger.warning(
+                "No %s candidates available for %s item %s",
+                "video" if is_video else "image",
+                shortcode,
+                image_index,
+            )
+            continue
+
+        best_candidate = max(valid_candidates, key=candidate_quality)
+        media_url = best_candidate.get("url")
+        if not isinstance(media_url, str) or not media_url:
+            logger.warning(
+                "Missing media URL for Instagram item %s of %s",
+                image_index,
+                shortcode,
+            )
+            continue
+
+        try:
+            media_path = (
+                download_instagram_video_url(media_url, directory, filename)
+                if is_video
+                else download_image_url(media_url, directory, filename)
+            )
+            if media_path is None:
+                logger.warning(
+                    "Failed to download Instagram item %s for %s",
+                    image_index,
+                    shortcode,
+                )
+                continue
+
+            digest = sha256_file(media_path)
+            if digest in content_hashes:
+                media_path.unlink(missing_ok=True)
+                continue
+
+            content_hashes.add(digest)
+            paths.append(media_path)
+        except OSError as exc:
+            logger.warning(
+                "Failed to process Instagram item %s for %s: %s",
+                image_index,
+                shortcode,
+                exc,
+            )
+
+    result = dedupe_media_paths(paths)
+    logger.info(
+        "Instagram extraction completed for %s: %s/%s media downloaded",
+        shortcode,
+        len(result),
+        len(media_items),
+    )
+    return result
 
 
 def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
@@ -1082,7 +1123,7 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     is_tiktok_url = bool(parsed_url.hostname and "tiktok.com" in parsed_url.hostname.lower())
 
     if is_instagram_post:
-        instagram_media = download_instagram_sidecar_media(url, directory)
+        instagram_media = download_instagram_media(url, directory)
         if instagram_media:
             return instagram_media
 
@@ -1114,9 +1155,6 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 return [twitter_image]
             if is_twitter_status:
                 raise DownloadError("No image was found in the Twitter/X post")
-            instagram_media = download_instagram_media(url, directory)
-            if instagram_media:
-                return instagram_media
             if is_tiktok_url:
                 tiktok_media = download_tiktok_media(url, directory)
                 if tiktok_media:
@@ -1138,9 +1176,6 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         else:
             if is_twitter_status:
                 raise DownloadError("No image was found in the Twitter/X post")
-            instagram_media = download_instagram_media(url, directory)
-            if instagram_media:
-                return instagram_media
             if is_tiktok_url:
                 tiktok_media = download_tiktok_media(url, directory)
                 if tiktok_media:
