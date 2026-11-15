@@ -870,11 +870,17 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                     len(page),
                 )
                 logger.info(
-                    "Instagram response diagnostics: "
-                    "display_url=%s, graphql=%s, login_page=%s",
-                    "display_url" in page,
-                    "graphql" in page,
-                    "login" in page.lower(),
+                    "Instagram HTML inspection for %s: "
+                    "display_url=%s, og:image=%s, EmbeddedMediaImage=%s, "
+                    "login_and_signup_page=%s, require_login=%s, "
+                    "carousel_metadata=%s",
+                    safe_page_url,
+                    "display_url" in page.lower(),
+                    "og:image" in page.lower(),
+                    "embeddedmediaimage" in page.lower(),
+                    "login_and_signup_page" in page.lower(),
+                    "require_login" in page.lower(),
+                    "edge_sidecar_to_children" in page.lower(),
                 )
         except HTTPError as exc:
             logger.warning(
@@ -908,15 +914,23 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
     if sidecar_paths:
         return sidecar_paths
 
-    image_urls = []
+    full_image_urls = []
     preview_urls = []
     for page in pages:
         full_urls, page_preview_urls = extract_instagram_image_urls(page)
-        image_urls.extend(full_urls)
+        full_image_urls.extend(full_urls)
         preview_urls.extend(page_preview_urls)
 
-    unique_urls = list(dict.fromkeys(image_urls))
-    if not unique_urls and not has_carousel_index:
+    if has_carousel_index and not full_image_urls:
+        logger.warning(
+            "No full carousel image metadata found for %s. "
+            "Skipping preview fallback.",
+            shortcode,
+        )
+        return []
+
+    unique_urls = list(dict.fromkeys(full_image_urls))
+    if not full_image_urls and not has_carousel_index:
         unique_urls = list(dict.fromkeys(preview_urls))
 
     paths = []
