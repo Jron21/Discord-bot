@@ -929,6 +929,37 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                 exc,
             )
 
+    keywords = [
+        "display_url",
+        "display_resources",
+        "image_versions2",
+        "carousel_media",
+        "edge_sidecar_to_children",
+        "xdt_shortcode_media",
+        "og:image",
+        "scontent",
+        "srcset",
+        "video_versions",
+    ]
+
+    for index, page in enumerate(pages, start=1):
+        logger.info("========== INSTAGRAM PAGE %s ==========", index)
+
+        for keyword in keywords:
+            count = page.lower().count(keyword.lower())
+            logger.info(
+                "%s: %s occurrences",
+                keyword,
+                count,
+            )
+
+        with open(
+            f"instagram_debug_{index}.html",
+            "w",
+            encoding="utf-8",
+        ) as file:
+            file.write(page)
+
     if not pages:
         return []
 
