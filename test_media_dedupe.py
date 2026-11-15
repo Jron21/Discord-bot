@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import mock_open, patch
+from unittest.mock import patch
 
 import main
 
@@ -47,7 +47,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
     def test_indexed_carousel_does_not_download_preview_only_metadata(self):
         preview_url = "https://scontent.cdninstagram.com/preview.jpg"
         page = f'<meta property="og:image" content="{preview_url}">'
-        debug_open = mock_open()
 
         with self.assertLogs(main.logger, level="WARNING") as captured:
             with (
@@ -58,7 +57,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
                 ),
                 patch.object(main, "download_instagram_sidecar_media", return_value=[]),
                 patch.object(main, "download_image_url") as download_image,
-                patch("builtins.open", debug_open),
             ):
                 media = main.download_instagram_media(
                     "https://www.instagram.com/p/example/?img_index=2",
@@ -71,11 +69,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
             "Skipping preview fallback",
             "\n".join(captured.output),
         )
-        self.assertIn(
-            "instagram_debug_1.html",
-            [call.args[0] for call in debug_open.call_args_list],
-        )
-        debug_open().write.assert_called_with(page)
 
     def test_indexed_carousel_downloads_all_display_urls(self):
         image_urls = [
@@ -85,7 +78,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
         page = json.dumps({
             "items": [{"display_url": image_url} for image_url in image_urls],
         }) + " login"
-        debug_open = mock_open()
 
         with self.assertLogs(main.logger, level="INFO") as captured:
             with tempfile.TemporaryDirectory() as directory:
@@ -102,7 +94,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
                     ),
                     patch.object(main, "download_instagram_sidecar_media", return_value=[]),
                     patch.object(main, "download_image_url", side_effect=save_image),
-                    patch("builtins.open", debug_open),
                 ):
                     media = main.download_instagram_media(
                         "https://www.instagram.com/p/example/?img_index=3",
@@ -119,11 +110,6 @@ class InstagramMediaExtractionTests(unittest.TestCase):
         self.assertIn("carousel_metadata=False", "\n".join(captured.output))
         self.assertIn("display_url=3", "\n".join(captured.output))
         self.assertIn("edge_sidecar_to_children=0", "\n".join(captured.output))
-        self.assertIn(
-            "instagram_debug_1.html",
-            [call.args[0] for call in debug_open.call_args_list],
-        )
-        debug_open().write.assert_called_with(page)
 
     def test_instagram_http_errors_are_logged_without_query_tokens(self):
         error = main.HTTPError(

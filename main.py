@@ -852,18 +852,6 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
-    diagnostic_keywords = (
-        "display_url",
-        "display_resources",
-        "image_versions2",
-        "carousel_media",
-        "edge_sidecar_to_children",
-        "xdt_shortcode_media",
-        "og:image",
-        "scontent",
-        "srcset",
-        "video_versions",
-    )
     pages = []
     for page_url in dict.fromkeys(page_urls):
         safe_page_url = urlparse(page_url)._replace(
@@ -895,15 +883,6 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                     "require_login" in lower_page,
                     "edge_sidecar_to_children" in lower_page,
                 )
-                keyword_counts = ", ".join(
-                    f"{keyword}={lower_page.count(keyword.lower())}"
-                    for keyword in diagnostic_keywords
-                )
-                logger.info(
-                    "Instagram page keyword counts for %s: %s",
-                    safe_page_url,
-                    keyword_counts,
-                )
         except HTTPError as exc:
             logger.warning(
                 "Instagram HTTP error %s for %s",
@@ -929,6 +908,7 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                 exc,
             )
 
+    # DEBUG: Inspect Instagram HTML for image metadata
     keywords = [
         "display_url",
         "display_resources",
@@ -947,11 +927,8 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
 
         for keyword in keywords:
             count = page.lower().count(keyword.lower())
-            logger.info(
-                "%s: %s occurrences",
-                keyword,
-                count,
-            )
+
+            logger.info("%s: %s occurrences", keyword, count)
 
         with open(
             f"instagram_debug_{index}.html",
@@ -959,6 +936,8 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
             encoding="utf-8",
         ) as file:
             file.write(page)
+
+    logger.info("Instagram HTML diagnostic completed.")
 
     if not pages:
         return []
