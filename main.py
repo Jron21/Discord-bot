@@ -852,6 +852,18 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         "Cache-Control": "no-cache",
         "Pragma": "no-cache",
     }
+    diagnostic_keywords = (
+        "display_url",
+        "display_resources",
+        "image_versions2",
+        "carousel_media",
+        "edge_sidecar_to_children",
+        "xdt_shortcode_media",
+        "og:image",
+        "scontent",
+        "srcset",
+        "video_versions",
+    )
     pages = []
     for page_url in dict.fromkeys(page_urls):
         safe_page_url = urlparse(page_url)._replace(
@@ -869,18 +881,28 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                     getattr(response, "status", "unknown"),
                     len(page),
                 )
+                lower_page = page.lower()
                 logger.info(
                     "Instagram HTML inspection for %s: "
                     "display_url=%s, og:image=%s, EmbeddedMediaImage=%s, "
                     "login_and_signup_page=%s, require_login=%s, "
                     "carousel_metadata=%s",
                     safe_page_url,
-                    "display_url" in page.lower(),
-                    "og:image" in page.lower(),
-                    "embeddedmediaimage" in page.lower(),
-                    "login_and_signup_page" in page.lower(),
-                    "require_login" in page.lower(),
-                    "edge_sidecar_to_children" in page.lower(),
+                    "display_url" in lower_page,
+                    "og:image" in lower_page,
+                    "embeddedmediaimage" in lower_page,
+                    "login_and_signup_page" in lower_page,
+                    "require_login" in lower_page,
+                    "edge_sidecar_to_children" in lower_page,
+                )
+                keyword_counts = ", ".join(
+                    f"{keyword}={lower_page.count(keyword.lower())}"
+                    for keyword in diagnostic_keywords
+                )
+                logger.info(
+                    "Instagram page keyword counts for %s: %s",
+                    safe_page_url,
+                    keyword_counts,
                 )
         except HTTPError as exc:
             logger.warning(

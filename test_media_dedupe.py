@@ -108,6 +108,8 @@ class InstagramMediaExtractionTests(unittest.TestCase):
             "\n".join(captured.output),
         )
         self.assertIn("carousel_metadata=False", "\n".join(captured.output))
+        self.assertIn("display_url=3", "\n".join(captured.output))
+        self.assertIn("edge_sidecar_to_children=0", "\n".join(captured.output))
 
     def test_instagram_http_errors_are_logged_without_query_tokens(self):
         error = main.HTTPError(
