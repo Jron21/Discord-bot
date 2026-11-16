@@ -1237,22 +1237,35 @@ def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
     shortcode = match.group(1)
     try:
         loader = instaloader.Instaloader()
+        cookie_jar = getattr(loader.context, "_session", None)
+        cookie_jar = getattr(cookie_jar, "cookies", None)
+        if cookie_jar is not None and INSTAGRAM_COOKIE:
+            for item in INSTAGRAM_COOKIE.split(";"):
+                name, separator, value = item.strip().partition("=")
+                if separator and name and value:
+                    cookie_jar.set(
+                        name,
+                        value,
+                        domain=".instagram.com",
+                        path="/",
+                        secure=True,
+                    )
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
     except Exception as exc:  # pragma: no cover - defensive fallback.
         logger.warning("Instaloader could not fetch Instagram post %s: %s", shortcode, exc)
         return []
 
-    if getattr(post, "typename", None) != "GraphSidecar":
-        return []
-
     paths: list[Path] = []
     content_hashes: set[bytes] = set()
 
-    try:
-        nodes = list(post.get_sidecar_nodes())
-    except Exception as exc:  # pragma: no cover - defensive fallback.
-        logger.warning("Instaloader could not enumerate carousel nodes for %s: %s", shortcode, exc)
-        return []
+    if getattr(post, "typename", None) == "GraphSidecar":
+        try:
+            nodes = list(post.get_sidecar_nodes())
+        except Exception as exc:  # pragma: no cover - defensive fallback.
+            logger.warning("Instaloader could not enumerate carousel nodes for %s: %s", shortcode, exc)
+            return []
+    else:
+        nodes = [post]
 
     for image_index, node in enumerate(nodes, start=1):
         is_video = getattr(node, "is_video", False)
@@ -1374,6 +1387,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
 
     if is_instagram_post:
         instagram_media = download_instagram_media(url, directory)
+        if instagram_media:
+            return instagram_media
+        instagram_media = download_instagram_sidecar_media(url, directory)
         if instagram_media:
             return instagram_media
 
