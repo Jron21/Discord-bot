@@ -38,6 +38,52 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
 INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
+INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
+_INSTAGRAM_COOKIE_TEMP_DIR = None
+
+
+def get_instagram_cookie_file() -> str | None:
+    """Return a Netscape cookie file for yt-dlp, creating one from the env cookie if needed."""
+    global _INSTAGRAM_COOKIE_TEMP_DIR
+
+    if INSTAGRAM_COOKIES_FILE:
+        cookie_path = Path(INSTAGRAM_COOKIES_FILE).expanduser()
+        if cookie_path.is_file():
+            return str(cookie_path)
+        logger.warning(
+            "Configured INSTAGRAM_COOKIES_FILE does not exist: %s",
+            cookie_path,
+        )
+
+    if not INSTAGRAM_COOKIE:
+        return None
+
+    if _INSTAGRAM_COOKIE_TEMP_DIR is None:
+        _INSTAGRAM_COOKIE_TEMP_DIR = tempfile.TemporaryDirectory(
+            prefix="instagram-cookies-"
+        )
+
+    cookie_lines = ["# Netscape HTTP Cookie File"]
+    for item in INSTAGRAM_COOKIE.split(";"):
+        name, separator, value = item.strip().partition("=")
+        if not separator or not name or not value:
+            continue
+        if any(char in name + value for char in "\r\n\t"):
+            continue
+        cookie_lines.append(
+            f".instagram.com\tTRUE\t/\tTRUE\t0\t{name}\t{value}"
+        )
+
+    if len(cookie_lines) == 1:
+        return None
+
+    cookie_path = Path(_INSTAGRAM_COOKIE_TEMP_DIR.name) / "cookies.txt"
+    cookie_path.write_text("\n".join(cookie_lines) + "\n", encoding="utf-8")
+    try:
+        cookie_path.chmod(0o600)
+    except OSError:
+        pass
+    return str(cookie_path)
 
 
 def resolve_ffmpeg_path() -> str:
@@ -1349,12 +1395,14 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         "no_warnings": True,
         "restrictfilenames": True,
     }
-    if is_instagram_post and INSTAGRAM_COOKIE:
+    if is_instagram_post:
         options["http_headers"] = {
-            "Cookie": INSTAGRAM_COOKIE,
             "User-Agent": BROWSER_USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
         }
+        cookie_path = get_instagram_cookie_file()
+        if cookie_path:
+            options["cookiefile"] = cookie_path
 
     with YoutubeDL(options) as downloader:
         try:
