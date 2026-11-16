@@ -37,6 +37,7 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
+INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
 
 
 def resolve_ffmpeg_path() -> str:
@@ -804,6 +805,124 @@ def extract_instagram_image_urls(page: str) -> tuple[list[str], list[str]]:
     return clean_urls(full_urls), clean_urls(preview_urls)
 
 
+def download_instagram_html_images(
+    url: str,
+    shortcode: str,
+    directory: str,
+) -> list[Path]:
+    request_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    if INSTAGRAM_COOKIE:
+        request_headers["Cookie"] = INSTAGRAM_COOKIE
+
+    request = Request(
+        url,
+        headers=request_headers,
+    )
+
+    try:
+        with urlopen(request, timeout=30) as response:
+            page = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        logger.warning(
+            "Instagram page fallback returned HTTP %s for %s",
+            exc.code,
+            shortcode,
+        )
+        return []
+    except URLError as exc:
+        logger.warning(
+            "Instagram page fallback connection failed for %s: %s",
+            shortcode,
+            exc.reason,
+        )
+        return []
+    except (OSError, UnicodeError) as exc:
+        logger.warning(
+            "Instagram page fallback failed for %s: %s",
+            shortcode,
+            exc,
+        )
+        return []
+
+    full_urls, preview_urls = extract_instagram_image_urls(page)
+    if not full_urls:
+        logger.warning(
+            "No full Instagram image metadata found for %s; "
+            "skipping %s preview image(s)",
+            shortcode,
+            len(preview_urls),
+        )
+        return []
+
+    query = parse_qs(urlparse(url).query)
+    requested_index = next(
+        (
+            int(value)
+            for value in query.get("img_index", [])
+            if value.isdecimal() and int(value) > 0
+        ),
+        None,
+    )
+    has_carousel_metadata = (
+        "edge_sidecar_to_children" in page
+        or "carousel_media" in page
+    )
+    if (
+        (requested_index is not None and len(full_urls) < requested_index)
+        or (has_carousel_metadata and len(full_urls) < 2)
+    ):
+        logger.warning(
+            "Instagram page metadata for %s appears incomplete "
+            "(%s full image(s)); refusing a partial carousel",
+            shortcode,
+            len(full_urls),
+        )
+        return []
+
+    paths = []
+    failed_download = False
+    for image_index, image_url in enumerate(full_urls, start=1):
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"instagram-{shortcode}-{image_index}",
+        )
+        if image_path is None:
+            failed_download = True
+            logger.warning(
+                "Could not download Instagram image %s for %s",
+                image_index,
+                shortcode,
+            )
+            continue
+        paths.append(image_path)
+
+    if failed_download:
+        logger.warning(
+            "Instagram HTML fallback for %s was incomplete; "
+            "not returning a partial carousel",
+            shortcode,
+        )
+        return []
+
+    result = dedupe_media_paths(paths)
+    logger.info(
+        "Instagram HTML fallback completed for %s: %s/%s images downloaded",
+        shortcode,
+        len(result),
+        len(full_urls),
+    )
+    return result
+
+
 def download_instagram_media(url: str, directory: str) -> list[Path]:
     """Download all available media from a public Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
@@ -831,6 +950,8 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         "X-IG-App-ID": app_id,
         "X-Requested-With": "XMLHttpRequest",
     }
+    if INSTAGRAM_COOKIE:
+        headers["Cookie"] = INSTAGRAM_COOKIE
 
     cookie_jar = CookieJar()
     opener = build_opener(HTTPCookieProcessor(cookie_jar))
@@ -854,6 +975,16 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
             ),
             None,
         )
+        if not csrf_token and INSTAGRAM_COOKIE:
+            csrf_token = next(
+                (
+                    value.strip('"')
+                    for item in INSTAGRAM_COOKIE.split(";")
+                    for name, separator, value in [item.strip().partition("=")]
+                    if separator and name.strip() == "csrftoken"
+                ),
+                None,
+            )
         if not csrf_token:
             logger.warning(
                 "Instagram did not provide a CSRF token for %s",
@@ -1218,15 +1349,29 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         "no_warnings": True,
         "restrictfilenames": True,
     }
+    if is_instagram_post and INSTAGRAM_COOKIE:
+        options["http_headers"] = {
+            "Cookie": INSTAGRAM_COOKIE,
+            "User-Agent": BROWSER_USER_AGENT,
+            "Accept-Language": "en-US,en;q=0.9",
+        }
 
     with YoutubeDL(options) as downloader:
         try:
             info = downloader.extract_info(url, download=False)
         except DownloadError:
-            if is_instagram_post:
+            if instagram_match is not None:
+                shortcode = instagram_match.group(1)
+                instagram_media = download_instagram_html_images(
+                    url,
+                    shortcode,
+                    directory,
+                )
+                if instagram_media:
+                    return instagram_media
                 raise DownloadError(
                     "Instagram did not provide downloadable media; "
-                    "preview thumbnails are not sent"
+                    "no full image metadata was available, so previews were skipped"
                 ) from None
             twitter_image = download_twitter_image(url, directory)
             if twitter_image is not None:
@@ -1255,9 +1400,16 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             )
             if instagram_media:
                 return instagram_media
+            instagram_media = download_instagram_html_images(
+                url,
+                shortcode,
+                directory,
+            )
+            if instagram_media:
+                return instagram_media
             raise DownloadError(
                 "Instagram did not provide full media metadata; "
-                "preview thumbnails are not sent"
+                "no full image metadata was available, so previews were skipped"
             )
 
         entries = list(info.get("entries") or [info])

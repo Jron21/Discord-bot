@@ -1,3 +1,5 @@
+import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +24,14 @@ class InstagramPreviewFallbackTests(unittest.TestCase):
             with (
                 patch.object(main, "download_instagram_media", return_value=[]),
                 patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(
+                    main,
+                    "urlopen",
+                    return_value=io.BytesIO(
+                        b'<meta property="og:image" '
+                        b'content="https://cdninstagram.com/cropped-preview.jpg">'
+                    ),
+                ),
                 patch.object(main, "download_open_graph_image") as open_graph,
                 patch.object(main, "download_image_url") as download_image,
                 self.assertRaisesRegex(
@@ -49,6 +59,14 @@ class InstagramPreviewFallbackTests(unittest.TestCase):
             with (
                 patch.object(main, "download_instagram_media", return_value=[]),
                 patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(
+                    main,
+                    "urlopen",
+                    return_value=io.BytesIO(
+                        b'<meta property="og:image" '
+                        b'content="https://cdninstagram.com/cropped-preview.jpg">'
+                    ),
+                ),
                 patch.object(main, "download_open_graph_image") as open_graph,
                 self.assertRaisesRegex(
                     main.DownloadError,
@@ -61,6 +79,55 @@ class InstagramPreviewFallbackTests(unittest.TestCase):
                 )
 
         open_graph.assert_not_called()
+
+    def test_graphql_and_yt_dlp_failure_can_fall_back_to_all_full_html_images(self):
+        image_urls = [
+            "https://cdninstagram.com/full-image-1.jpg",
+            "https://cdninstagram.com/full-image-2.jpg",
+        ]
+        page = json.dumps({
+            "edge_sidecar_to_children": {
+                "edges": [
+                    {"node": {"display_url": image_url}}
+                    for image_url in image_urls
+                ],
+            },
+        }) + (
+            '<meta property="og:image" '
+            'content="https://cdninstagram.com/cropped-preview.jpg">'
+        )
+        downloader = MagicMock()
+        downloader.__enter__.return_value = downloader
+        downloader.__exit__.return_value = False
+        downloader.extract_info.side_effect = main.DownloadError(
+            "No video formats found"
+        )
+        selected_urls = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            def save_image(media_url, target_directory, filename):
+                selected_urls.append(media_url)
+                path = Path(target_directory) / f"{filename}.jpg"
+                path.write_bytes(media_url.encode())
+                return path
+
+            with (
+                patch.object(main, "download_instagram_media", return_value=[]),
+                patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(
+                    main,
+                    "urlopen",
+                    return_value=io.BytesIO(page.encode()),
+                ),
+                patch.object(main, "download_image_url", side_effect=save_image),
+            ):
+                media = main.download_social_media(
+                    "https://www.instagram.com/p/DfjAPIEnfOJ/",
+                    directory,
+                )
+
+        self.assertEqual(len(media), len(image_urls))
+        self.assertEqual(selected_urls, image_urls)
 
     def test_all_full_carousel_items_are_downloaded_from_ytdlp_metadata(self):
         image_one = "https://cdninstagram.com/full-image-1.jpg"
