@@ -978,7 +978,7 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
 
     shortcode = match.group(1)
     instagram_home = "https://www.instagram.com/"
-    graphql_url = "https://www.instagram.com/graphql/query"
+    graphql_url = "https://www.instagram.com/api/graphql"
     app_id = "936619743392459"
     doc_id = "27128499623469141"
     user_agent = (
@@ -1003,15 +1003,25 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
     opener = build_opener(HTTPCookieProcessor(cookie_jar))
 
     try:
-        home_request = Request(
-            instagram_home,
-            headers={
-                "User-Agent": user_agent,
-                "Accept": "text/html,application/xhtml+xml",
-            },
-        )
+        home_headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml",
+        }
+        if INSTAGRAM_COOKIE:
+            home_headers["Cookie"] = INSTAGRAM_COOKIE
+        home_request = Request(instagram_home, headers=home_headers)
         with opener.open(home_request, timeout=30) as response:
-            response.read(1024)
+            home_page = response.read().decode("utf-8", errors="replace")
+
+        web_api_tokens = {}
+        for token_name, token_pattern in (
+            ("fb_dtsg", r'"DTSGInitialData",\[\],\{[^{}]*"token":"([^"]+)"'),
+            ("lsd", r'"LSD",\[\],\{[^{}]*"token":"([^"]+)"'),
+            ("av", r'"IG_USER_EIMU":"?(\d+)'),
+        ):
+            token_match = re.search(token_pattern, home_page)
+            if token_match:
+                web_api_tokens[token_name] = token_match.group(1)
 
         csrf_token = next(
             (
@@ -1046,6 +1056,7 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
             "doc_id": doc_id,
             "variables": json.dumps(variables, separators=(",", ":")),
             "server_timestamps": "true",
+            **web_api_tokens,
         }).encode("utf-8")
         graphql_request = Request(
             graphql_url,
@@ -1054,6 +1065,14 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
                 **headers,
                 "Content-Type": "application/x-www-form-urlencoded",
                 "X-CSRFToken": csrf_token,
+                **(
+                    {"X-FB-LSD": web_api_tokens["lsd"]}
+                    if "lsd" in web_api_tokens
+                    else {}
+                ),
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
             },
             method="POST",
         )
