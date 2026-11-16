@@ -9,13 +9,11 @@ from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 from vercel.queue import send
 
-from main import BOT_OWNER_ID, SOCIAL_MEDIA_URL_PATTERN
+from main import SOCIAL_MEDIA_URL_PATTERN
 
 
 app = FastAPI()
 MEDIA_TOPIC = "sora-social-media"
-SERVER_LIST_TOPIC = "sora-server-list"
-USER_INSTALL_TOPIC = "sora-user-install"
 PING = {"type": 1}
 logger = logging.getLogger("Sora10Chan.VercelInteractions")
 
@@ -76,66 +74,13 @@ async def interactions(request: Request) -> JSONResponse:
 
     data = payload.get("data") or {}
     command = data.get("name")
-    integration_owners = payload.get("authorizing_integration_owners") or {}
-    user_install_owner_id = integration_owners.get("1")
-    if user_install_owner_id is not None:
-        user_install_owner_id = str(user_install_owner_id)
-        if not user_install_owner_id.isdecimal():
-            logger.warning("Discord sent an invalid user-install owner ID")
-        elif not os.getenv("DATABASE_URL"):
-            logger.warning(
-                "Personal-install user was not recorded because DATABASE_URL "
-                "is not configured"
-            )
-        else:
-            try:
-                await send(
-                    USER_INSTALL_TOPIC,
-                    {"user_id": user_install_owner_id},
-                    delay=2,
-                    idempotency_key=f"{payload['id']}-user-install",
-                )
-            except Exception:
-                logger.exception(
-                    "Could not queue personal-install user tracking"
-                )
+    # Temporarily disabled: personal-install tracking used by the /server report.
 
     if command == "ping":
         return interaction_response("Pong! Sora10Chan is online.")
     if command == "test":
         return interaction_response("Sora10Chan slash commands are working!")
-    if command == "server":
-        member = payload.get("member") or {}
-        user = member.get("user") or payload.get("user") or {}
-        if user.get("id") != str(BOT_OWNER_ID):
-            return JSONResponse({
-                "type": 4,
-                "data": {
-                    "content": "Only the bot owner can use this command.",
-                    "flags": 64,
-                },
-            })
-
-        try:
-            await send(
-                SERVER_LIST_TOPIC,
-                {
-                    "application_id": payload["application_id"],
-                    "interaction_token": payload["token"],
-                },
-                delay=2,
-                idempotency_key=payload["id"],
-            )
-        except Exception:
-            logger.exception("Could not queue the server-list request")
-            return JSONResponse({
-                "type": 4,
-                "data": {
-                    "content": "I couldn't start the server-list request. Please try again.",
-                    "flags": 64,
-                },
-            })
-        return JSONResponse({"type": 5, "data": {"flags": 64}})
+    # Temporarily disabled: the /server command and its queue request.
     if command not in {"download", "media"}:
         return interaction_response("That command is not available on Vercel.")
 

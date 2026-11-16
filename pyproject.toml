@@ -21,8 +21,9 @@ entrypoint = "api.interactions:app"
 [[tool.vercel.subscribers]]
 entrypoint = "queues.media"
 
-[[tool.vercel.subscribers]]
-entrypoint = "queues.servers"
-
-[[tool.vercel.subscribers]]
-entrypoint = "queues.user_installs"
+# Temporarily disabled: server-list and personal-install tracking subscribers.
+# [[tool.vercel.subscribers]]
+# entrypoint = "queues.servers"
+#
+# [[tool.vercel.subscribers]]
+# entrypoint = "queues.user_installs"

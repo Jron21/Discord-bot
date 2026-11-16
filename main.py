@@ -19,16 +19,9 @@ from html.parser import HTMLParser
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 import discord
-import psycopg
 from dotenv import load_dotenv
 from discord.ext import commands
 from yt_dlp import DownloadError, YoutubeDL
-
-from install_tracking import (
-    DatabaseNotConfiguredError,
-    list_personal_install_users,
-    record_personal_install_user,
-)
 
 try:
     import instaloader
@@ -44,7 +37,6 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
-BOT_OWNER_ID = 670920777926705185
 
 
 def resolve_ffmpeg_path() -> str:
@@ -1776,25 +1768,7 @@ async def on_ready():
         logger.exception("Discord slash command registration failed")
 
 
-@bot.listen("on_interaction")
-async def track_personal_install_user(interaction: discord.Interaction):
-    if not interaction.is_user_integration():
-        return
-
-    if not os.getenv("DATABASE_URL"):
-        logger.warning(
-            "Personal-install user was not recorded because DATABASE_URL "
-            "is not configured"
-        )
-        return
-
-    try:
-        await asyncio.to_thread(
-            record_personal_install_user,
-            str(interaction.user.id),
-        )
-    except (DatabaseNotConfiguredError, psycopg.Error, ValueError):
-        logger.exception("Could not record personal-install user")
+# Temporarily disabled: personal-install tracking used by the /server report.
 
 
 @bot.event
@@ -1964,83 +1938,7 @@ async def test(interaction: discord.Interaction):
     )
 
 
-@bot.tree.command(
-    name="server",
-    description="Show the servers Sora10Chan is in (owner only)",
-)
-async def server(interaction: discord.Interaction):
-    if interaction.user.id != BOT_OWNER_ID:
-        await interaction.response.send_message(
-            "Only the bot owner can use this command.",
-            ephemeral=True,
-        )
-        return
-
-    embeds = []
-    guilds = bot.guilds
-    if guilds:
-        for page_start in range(0, len(guilds), 20):
-            page_guilds = guilds[page_start:page_start + 20]
-            page_number = page_start // 20 + 1
-            page_count = (len(guilds) + 19) // 20
-            embed = discord.Embed(
-                title=f"Servers using Sora10Chan ({len(guilds)})",
-                description=f"Page {page_number} of {page_count}",
-            )
-            for guild in page_guilds:
-                member_count = (
-                    str(guild.member_count)
-                    if guild.member_count is not None
-                    else "Unknown"
-                )
-                embed.add_field(
-                    name=guild.name,
-                    value=f"ID: `{guild.id}` | Members: {member_count}",
-                    inline=False,
-                )
-            embeds.append(embed)
-    else:
-        embeds.append(discord.Embed(
-            title="Servers using Sora10Chan (0)",
-            description="Sora10Chan is not currently in any servers.",
-        ))
-
-    try:
-        user_ids = await asyncio.to_thread(list_personal_install_users)
-    except DatabaseNotConfiguredError:
-        user_pages = [[
-            "Personal-install tracking is not configured. Add DATABASE_URL "
-            "to the bot's environment.",
-        ]]
-        user_count = "unavailable"
-    except psycopg.Error:
-        logger.exception("Could not load personal-install users")
-        user_pages = [["I couldn't load personal-install users; check the logs."]]
-        user_count = "unavailable"
-    else:
-        user_pages = [
-            [
-                f"<@{user_id}> (`{user_id}`)"
-                for user_id in user_ids[page_start:page_start + 20]
-            ]
-            for page_start in range(0, len(user_ids), 20)
-        ]
-        if not user_pages:
-            user_pages = [[
-                "No users have been seen using a personal install yet. "
-                "Tracking starts when they use a command after setup.",
-            ]]
-        user_count = str(len(user_ids))
-
-    for user_page in user_pages:
-        embeds.append(discord.Embed(
-            title=f"Users seen using a personal install ({user_count})",
-            description="\n".join(user_page),
-        ))
-
-    await interaction.response.send_message(embeds=[embeds[0]], ephemeral=True)
-    for embed in embeds[1:]:
-        await interaction.followup.send(embed=embed, ephemeral=True)
+# Temporarily disabled: the /server command and its database-backed report.
 
 
 @bot.tree.command(

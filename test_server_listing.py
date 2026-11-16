@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from fastapi.testclient import TestClient
 from nacl.signing import SigningKey
 
-from api.interactions import SERVER_LIST_TOPIC, USER_INSTALL_TOPIC, app
+from api.interactions import app
 from install_tracking import record_personal_install_user, list_personal_install_users
 from queues.servers import (
     fetch_bot_guilds,
@@ -102,25 +102,17 @@ class ServerCommandInteractionTests(unittest.TestCase):
             )
         return response
 
-    def test_owner_is_acknowledged_privately_and_request_is_queued(self):
+    def test_server_command_is_unavailable_and_not_queued(self):
         with patch("api.interactions.send", new_callable=AsyncMock) as send:
             response = self.post_signed_command(670920777926705185)
 
-        self.assertEqual(response.json(), {"type": 5, "data": {"flags": 64}})
         self.assertEqual(
-            [call.args[0] for call in send.await_args_list],
-            [SERVER_LIST_TOPIC],
+            response.json()["data"]["content"],
+            "That command is not available on Vercel.",
         )
-
-    def test_non_owner_is_denied_privately_without_queueing(self):
-        with patch("api.interactions.send", new_callable=AsyncMock) as send:
-            response = self.post_signed_command(123)
-
-        self.assertEqual(response.json()["data"]["flags"], 64)
-        self.assertIn("Only the bot owner", response.json()["data"]["content"])
         send.assert_not_awaited()
 
-    def test_user_install_owner_is_queued_for_tracking(self):
+    def test_personal_install_tracking_is_disabled(self):
         with patch("api.interactions.send", new_callable=AsyncMock) as send:
             response = self.post_signed_command(
                 123,
@@ -129,9 +121,7 @@ class ServerCommandInteractionTests(unittest.TestCase):
             )
 
         self.assertEqual(response.json()["data"]["content"], "Pong! Sora10Chan is online.")
-        self.assertEqual(len(send.await_args_list), 1)
-        self.assertEqual(send.await_args.args[0], USER_INSTALL_TOPIC)
-        self.assertEqual(send.await_args.args[1], {"user_id": "456"})
+        send.assert_not_awaited()
 
 
 class PersonalInstallStorageTests(unittest.TestCase):
