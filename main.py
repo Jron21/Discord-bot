@@ -1107,10 +1107,91 @@ def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
     return dedupe_media_paths(paths)
 
 
+def download_instagram_info_media(
+    info: dict,
+    shortcode: str,
+    directory: str,
+) -> list[Path]:
+    """Download each full image or video candidate returned by yt-dlp."""
+    raw_entries = info.get("entries")
+    entries = raw_entries if isinstance(raw_entries, list) and raw_entries else [info]
+    paths: list[Path] = []
+
+    def candidate_quality(candidate: dict) -> tuple[float, float, float]:
+        width = candidate.get("width")
+        height = candidate.get("height")
+        tbr = candidate.get("tbr")
+        width = float(width) if isinstance(width, (int, float)) and width > 0 else 0
+        height = float(height) if isinstance(height, (int, float)) and height > 0 else 0
+        tbr = float(tbr) if isinstance(tbr, (int, float)) and tbr > 0 else 0
+        return width * height, width, tbr
+
+    for media_index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            continue
+
+        raw_formats = entry.get("formats")
+        if isinstance(raw_formats, list) and raw_formats:
+            candidates = [
+                candidate
+                for candidate in raw_formats
+                if isinstance(candidate, dict)
+                and isinstance(candidate.get("url"), str)
+                and candidate["url"]
+            ]
+            is_video = True
+        else:
+            raw_thumbnails = entry.get("thumbnails")
+            # yt-dlp maps Instagram image_versions2 candidates to this list;
+            # the scalar `thumbnail` field is only a preview and is ignored.
+            candidates = (
+                [
+                    candidate
+                    for candidate in raw_thumbnails
+                    if isinstance(candidate, dict)
+                    and isinstance(candidate.get("url"), str)
+                    and candidate["url"]
+                ]
+                if isinstance(raw_thumbnails, list)
+                else []
+            )
+            is_video = False
+
+        if not candidates:
+            logger.warning(
+                "No full %s candidate available for Instagram item %s of %s",
+                "video" if is_video else "image",
+                media_index,
+                shortcode,
+            )
+            continue
+
+        best_candidate = max(candidates, key=candidate_quality)
+        media_url = best_candidate["url"]
+        filename = f"instagram-{shortcode}-{media_index}"
+        media_path = (
+            download_instagram_video_url(media_url, directory, filename)
+            if is_video
+            else download_image_url(media_url, directory, filename)
+        )
+        if media_path is not None:
+            paths.append(media_path)
+
+    result = dedupe_media_paths(paths)
+    logger.info(
+        "Instagram yt-dlp extraction completed for %s: %s/%s media downloaded",
+        shortcode,
+        len(result),
+        len(entries),
+    )
+    return result
+
+
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
-    is_instagram_post = INSTAGRAM_POST_PATTERN.search(url) is not None
+    instagram_match = INSTAGRAM_POST_PATTERN.search(url)
+    is_instagram_post = instagram_match is not None
     parsed_url = urlparse(url)
     is_tiktok_url = bool(parsed_url.hostname and "tiktok.com" in parsed_url.hostname.lower())
 
@@ -1142,6 +1223,11 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         try:
             info = downloader.extract_info(url, download=False)
         except DownloadError:
+            if is_instagram_post:
+                raise DownloadError(
+                    "Instagram did not provide downloadable media; "
+                    "preview thumbnails are not sent"
+                ) from None
             twitter_image = download_twitter_image(url, directory)
             if twitter_image is not None:
                 return [twitter_image]
@@ -1155,6 +1241,24 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             if open_graph_image is not None:
                 return [open_graph_image]
             raise
+
+        if instagram_match is not None:
+            shortcode = instagram_match.group(1)
+            if not isinstance(info, dict):
+                raise DownloadError(
+                    "Instagram did not return usable media metadata"
+                )
+            instagram_media = download_instagram_info_media(
+                info,
+                shortcode,
+                directory,
+            )
+            if instagram_media:
+                return instagram_media
+            raise DownloadError(
+                "Instagram did not provide full media metadata; "
+                "preview thumbnails are not sent"
+            )
 
         entries = list(info.get("entries") or [info])
 

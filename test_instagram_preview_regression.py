@@ -1,0 +1,155 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import main
+
+
+class InstagramPreviewFallbackTests(unittest.TestCase):
+    def test_thumbnail_only_metadata_is_rejected(self):
+        downloader = MagicMock()
+        downloader.__enter__.return_value = downloader
+        downloader.__exit__.return_value = False
+        downloader.extract_info.return_value = {
+            "entries": [{
+                "thumbnail": "https://cdninstagram.com/cropped-preview.jpg",
+                "url": "https://cdninstagram.com/cropped-preview.jpg",
+            }],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(main, "download_instagram_media", return_value=[]),
+                patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(main, "download_open_graph_image") as open_graph,
+                patch.object(main, "download_image_url") as download_image,
+                self.assertRaisesRegex(
+                    main.DownloadError,
+                    "preview thumbnails are not sent",
+                ),
+            ):
+                main.download_social_media(
+                    "https://www.instagram.com/p/DfjAPIEnfOJ/",
+                    directory,
+                )
+
+        open_graph.assert_not_called()
+        download_image.assert_not_called()
+
+    def test_yt_dlp_failure_does_not_fall_back_to_open_graph_preview(self):
+        downloader = MagicMock()
+        downloader.__enter__.return_value = downloader
+        downloader.__exit__.return_value = False
+        downloader.extract_info.side_effect = main.DownloadError(
+            "No video formats found"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(main, "download_instagram_media", return_value=[]),
+                patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(main, "download_open_graph_image") as open_graph,
+                self.assertRaisesRegex(
+                    main.DownloadError,
+                    "preview thumbnails are not sent",
+                ),
+            ):
+                main.download_social_media(
+                    "https://www.instagram.com/p/DfjAPIEnfOJ/",
+                    directory,
+                )
+
+        open_graph.assert_not_called()
+
+    def test_all_full_carousel_items_are_downloaded_from_ytdlp_metadata(self):
+        image_one = "https://cdninstagram.com/full-image-1.jpg"
+        image_two = "https://cdninstagram.com/full-image-2.jpg"
+        video_url = "https://cdninstagram.com/carousel-video.mp4"
+        downloader = MagicMock()
+        downloader.__enter__.return_value = downloader
+        downloader.__exit__.return_value = False
+        downloader.extract_info.return_value = {
+            "entries": [
+                {
+                    "thumbnail": "https://cdninstagram.com/cropped-preview.jpg",
+                    "thumbnails": [
+                        {"url": "https://cdninstagram.com/low-image-1.jpg", "width": 100, "height": 100},
+                        {"url": image_one, "width": 1000, "height": 1000},
+                    ],
+                },
+                {
+                    "thumbnails": [
+                        {"url": image_two, "width": 1200, "height": 800},
+                    ],
+                },
+                {
+                    "formats": [
+                        {"url": video_url, "width": 1280, "height": 720},
+                    ],
+                },
+            ],
+        }
+        selected_urls = []
+
+        with tempfile.TemporaryDirectory() as directory:
+            def save_media(media_url, target_directory, filename):
+                selected_urls.append(media_url)
+                extension = ".mp4" if media_url.endswith(".mp4") else ".jpg"
+                path = Path(target_directory) / f"{filename}{extension}"
+                path.write_bytes(media_url.encode())
+                return path
+
+            with (
+                patch.object(main, "download_instagram_media", return_value=[]),
+                patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(main, "download_image_url", side_effect=save_media),
+                patch.object(main, "download_instagram_video_url", side_effect=save_media),
+            ):
+                media = main.download_social_media(
+                    "https://www.instagram.com/p/DfjAPIEnfOJ/",
+                    directory,
+                )
+
+        self.assertEqual(len(media), 3)
+        self.assertEqual(selected_urls, [image_one, image_two, video_url])
+
+    def test_real_video_formats_remain_downloadable(self):
+        downloader = MagicMock()
+        downloader.__enter__.return_value = downloader
+        downloader.__exit__.return_value = False
+        downloader.extract_info.return_value = {
+            "id": "DfjAPIEnfOJ",
+            "formats": [{
+                "format_id": "video",
+                "url": "https://cdninstagram.com/video.mp4",
+                "width": 1280,
+                "height": 720,
+            }],
+        }
+
+        with tempfile.TemporaryDirectory() as directory:
+            video_url = "https://cdninstagram.com/video.mp4"
+
+            def save_video(media_url, target_directory, filename):
+                self.assertEqual(media_url, video_url)
+                video_path = Path(target_directory) / f"{filename}.mp4"
+                video_path.write_bytes(b"video")
+                return video_path
+
+            with (
+                patch.object(main, "download_instagram_media", return_value=[]),
+                patch.object(main, "YoutubeDL", return_value=downloader),
+                patch.object(
+                    main,
+                    "download_instagram_video_url",
+                    side_effect=save_video,
+                ),
+            ):
+                media = main.download_social_media(
+                    "https://www.instagram.com/p/DfjAPIEnfOJ/",
+                    directory,
+                )
+
+        self.assertEqual(len(media), 1)
+        self.assertEqual(media[0].suffix, ".mp4")
