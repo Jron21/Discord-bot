@@ -444,13 +444,17 @@ def download_image_url(
     image_url: str,
     directory: str,
     filename: str,
+    headers: dict[str, str] | None = None,
 ) -> Path | None:
     url_extension = Path(urlparse(image_url).path).suffix.lower()
     if "dst-jpg" in image_url or url_extension == ".heic":
         url_extension = ".jpg"
     extension = url_extension or ".jpg"
     temporary_path = Path(directory) / f"{filename}.download"
-    request = Request(image_url, headers={"User-Agent": "Mozilla/5.0"})
+    request_headers = {"User-Agent": "Mozilla/5.0"}
+    if headers:
+        request_headers.update(headers)
+    request = Request(image_url, headers=request_headers)
 
     try:
         with urlopen(request, timeout=30) as response, temporary_path.open("wb") as output:
@@ -1558,11 +1562,13 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         if is_xiaohongshu_url and not any(entry.get("formats") for entry in entries):
             image_paths = []
             seen_image_keys = set()
+            thumbnail_count = 0
             for entry_index, entry in enumerate(entries):
                 for image_index, thumbnail in enumerate(entry.get("thumbnails") or []):
                     image_url = thumbnail.get("url")
                     if not image_url:
                         continue
+                    thumbnail_count += 1
                     image_parts = urlparse(image_url)
                     image_key = (
                         image_parts.hostname,
@@ -1575,11 +1581,17 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                         image_url,
                         directory,
                         f"{entry.get('id', 'xiaohongshu')}-{entry_index}-{image_index}",
+                        headers={"Referer": "https://www.xiaohongshu.com/"},
                     )
                     if image_path is not None:
                         image_paths.append(image_path)
             if image_paths:
                 return image_paths
+            logger.warning(
+                "Xiaohongshu image extraction found %s thumbnails but downloaded %s",
+                thumbnail_count,
+                len(image_paths),
+            )
 
         video_entry = next(
             (entry for entry in entries if entry.get("formats")),
