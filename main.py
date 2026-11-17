@@ -495,6 +495,89 @@ def download_image_url(
     return image_path
 
 
+def extract_xiaohongshu_image_urls(page: str) -> list[str]:
+    """Extract one best-quality CDN URL per image from page-state arrays."""
+    image_urls = []
+    for image_list_match in re.finditer(r'"imageList"\s*:\s*\[', page):
+        array_start = image_list_match.end() - 1
+        depth = 0
+        in_string = False
+        escaped = False
+        array_end = None
+        for index in range(array_start, len(page)):
+            char = page[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0:
+                    array_end = index
+                    break
+        if array_end is None:
+            continue
+
+        try:
+            image_items = json.loads(page[array_start:array_end + 1])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(image_items, list):
+            continue
+
+        for image_item in image_items:
+            if not isinstance(image_item, dict):
+                continue
+            variants = [
+                variant
+                for variant in image_item.get("infoList", [])
+                if isinstance(variant, dict) and isinstance(variant.get("url"), str)
+            ]
+            scene_priority = {
+                "WB_ORG": 0,
+                "H5_DTL": 0,
+                "WB_DFT": 1,
+                "H5_PRV": 2,
+            }
+            variants.sort(
+                key=lambda variant: scene_priority.get(
+                    variant.get("imageScene"), 3
+                )
+            )
+            image_url = (
+                variants[0]["url"]
+                if variants
+                else image_item.get("url")
+            )
+            if not isinstance(image_url, str):
+                continue
+
+            parsed_image_url = urlparse(image_url)
+            host = (parsed_image_url.hostname or "").lower()
+            if (
+                parsed_image_url.scheme in {"http", "https"}
+                and (
+                    host.endswith(".xhscdn.com")
+                    or host == "xhscdn.com"
+                    or host.endswith(".rednotecdn.com")
+                    or host == "rednotecdn.com"
+                )
+            ):
+                if parsed_image_url.scheme == "http":
+                    image_url = parsed_image_url._replace(scheme="https").geturl()
+                image_urls.append(image_url)
+
+    return list(dict.fromkeys(image_urls))
+
+
 def download_xiaohongshu_page_images(
     url: str,
     directory: str,
@@ -518,29 +601,7 @@ def download_xiaohongshu_page_images(
         logger.warning("Could not read Xiaohongshu page data for %s: %s", post_id, exc)
         return []
 
-    image_urls = []
-    for image_list in re.finditer(r'"imageList"\s*:\s*\[(.*?)\]', page, re.DOTALL):
-        for url_match in re.finditer(
-            r'"url"\s*:\s*("(?:\\.|[^"\\])*")',
-            image_list.group(1),
-        ):
-            try:
-                image_url = json.loads(url_match.group(1))
-            except json.JSONDecodeError:
-                continue
-            parsed_image_url = urlparse(image_url)
-            host = (parsed_image_url.hostname or "").lower()
-            if (
-                parsed_image_url.scheme == "https"
-                and (
-                    host.endswith(".xhscdn.com")
-                    or host == "xhscdn.com"
-                    or host.endswith(".rednotecdn.com")
-                    or host == "rednotecdn.com"
-                )
-            ):
-                image_urls.append(image_url)
-
+    image_urls = extract_xiaohongshu_image_urls(page)
     paths = []
     seen_keys = set()
     for image_index, image_url in enumerate(image_urls):
