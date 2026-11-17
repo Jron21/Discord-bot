@@ -495,6 +495,72 @@ def download_image_url(
     return image_path
 
 
+def download_xiaohongshu_page_images(
+    url: str,
+    directory: str,
+    post_id: str,
+) -> list[Path]:
+    """Read image URLs from the page state when yt-dlp misses RedNote's new schema."""
+    headers = {
+        "User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT,
+        "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.xiaohongshu.com/",
+    }
+    if XIAOHONGSHU_COOKIE and not any(
+        char in XIAOHONGSHU_COOKIE for char in "\r\n"
+    ):
+        headers["Cookie"] = XIAOHONGSHU_COOKIE
+
+    try:
+        with urlopen(Request(url, headers=headers), timeout=30) as response:
+            page = response.read().decode("utf-8", errors="replace")
+    except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        logger.warning("Could not read Xiaohongshu page data for %s: %s", post_id, exc)
+        return []
+
+    image_urls = []
+    for image_list in re.finditer(r'"imageList"\s*:\s*\[(.*?)\]', page, re.DOTALL):
+        for url_match in re.finditer(
+            r'"url"\s*:\s*("(?:\\.|[^"\\])*")',
+            image_list.group(1),
+        ):
+            try:
+                image_url = json.loads(url_match.group(1))
+            except json.JSONDecodeError:
+                continue
+            parsed_image_url = urlparse(image_url)
+            host = (parsed_image_url.hostname or "").lower()
+            if (
+                parsed_image_url.scheme == "https"
+                and (
+                    host.endswith(".xhscdn.com")
+                    or host == "xhscdn.com"
+                    or host.endswith(".rednotecdn.com")
+                    or host == "rednotecdn.com"
+                )
+            ):
+                image_urls.append(image_url)
+
+    paths = []
+    seen_keys = set()
+    for image_index, image_url in enumerate(image_urls):
+        parsed_image_url = urlparse(image_url)
+        image_key = (parsed_image_url.hostname, parsed_image_url.path)
+        if image_key in seen_keys:
+            continue
+        seen_keys.add(image_key)
+        image_path = download_image_url(
+            image_url,
+            directory,
+            f"xiaohongshu-{post_id}-{image_index}",
+            headers=headers,
+        )
+        if image_path is not None:
+            paths.append(image_path)
+
+    return paths
+
+
 def download_instagram_video_url(
     video_url: str,
     directory: str,
@@ -1616,6 +1682,13 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                     )
                     if image_path is not None:
                         image_paths.append(image_path)
+            if image_paths:
+                return image_paths
+            image_paths = download_xiaohongshu_page_images(
+                url,
+                directory,
+                str(info.get("id") or "post"),
+            )
             if image_paths:
                 return image_paths
             logger.warning(
