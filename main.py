@@ -966,13 +966,112 @@ def download_tiktok_photo(url: str, directory: str) -> list[Path]:
     return dedupe_media_paths(paths)
 
 
-def extract_instagram_image_urls(page: str) -> tuple[list[str], list[str]]:
+def extract_balanced_json_container(page: str, start: int) -> str | None:
+    """Return one JSON array/object from its opening bracket, respecting strings."""
+    if start >= len(page) or page[start] not in "[{":
+        return None
+
+    closing_for = {"[": "]", "{": "}"}
+    stack = []
+    in_string = False
+    escaped = False
+    for index in range(start, len(page)):
+        char = page[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(closing_for[char])
+        elif char in "]}":
+            if not stack or char != stack.pop():
+                return None
+            if not stack:
+                return page[start:index + 1]
+    return None
+
+
+def extract_instagram_image_urls(
+    page: str,
+    shortcode: str | None = None,
+) -> tuple[list[str], list[str]]:
     """Return full image metadata URLs and preview URLs separately."""
     full_urls = re.findall(
         r'display_url\\?"\s*:\s*\\?"(https:[^"]+)',
         page,
         re.IGNORECASE,
     )
+
+    if shortcode:
+        target_match = re.search(
+            rf'"code"\s*:\s*"{re.escape(shortcode)}"',
+            page,
+        )
+        if target_match:
+            target_data = page[target_match.end():]
+            media_type_match = re.search(r'"media_type"\s*:\s*(\d+)', target_data[:8000])
+            media_type = int(media_type_match.group(1)) if media_type_match else None
+            carousel_marker = page.find('"carousel_media"', target_match.end())
+            if carousel_marker >= 0 and (media_type is None or media_type == 8):
+                array_start = page.find("[", carousel_marker)
+                array_text = extract_balanced_json_container(page, array_start)
+                try:
+                    carousel_media = json.loads(array_text) if array_text else []
+                except json.JSONDecodeError:
+                    carousel_media = []
+                if isinstance(carousel_media, list):
+                    for item in carousel_media:
+                        if not isinstance(item, dict) or item.get("media_type") == 2:
+                            continue
+                        candidates = (
+                            (item.get("image_versions2") or {}).get("candidates") or []
+                        )
+                        valid_candidates = [
+                            candidate
+                            for candidate in candidates
+                            if isinstance(candidate, dict)
+                            and isinstance(candidate.get("url"), str)
+                        ]
+                        if valid_candidates:
+                            best_candidate = max(
+                                valid_candidates,
+                                key=lambda candidate: (
+                                    (candidate.get("width") or 0)
+                                    * (candidate.get("height") or 0)
+                                ),
+                            )
+                            full_urls.append(best_candidate["url"])
+            elif media_type != 2:
+                image_marker = page.find('"image_versions2"', target_match.end())
+                if image_marker >= 0:
+                    object_start = page.find("{", image_marker)
+                    image_data_text = extract_balanced_json_container(page, object_start)
+                    try:
+                        image_data = json.loads(image_data_text) if image_data_text else {}
+                    except json.JSONDecodeError:
+                        image_data = {}
+                    candidates = image_data.get("candidates", [])
+                    valid_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if isinstance(candidate, dict)
+                        and isinstance(candidate.get("url"), str)
+                    ]
+                    if valid_candidates:
+                        best_candidate = max(
+                            valid_candidates,
+                            key=lambda candidate: (
+                                (candidate.get("width") or 0)
+                                * (candidate.get("height") or 0)
+                            ),
+                        )
+                        full_urls.append(best_candidate["url"])
 
     preview_urls = []
     preview_patterns = [
@@ -1023,9 +1122,9 @@ def download_instagram_html_images(
 ) -> list[Path]:
     request_headers = {
         "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/131.0.0.0 Safari/537.36"
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+            "Mobile/15E148 Safari/604.1"
         ),
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.9",
@@ -1063,7 +1162,7 @@ def download_instagram_html_images(
         )
         return []
 
-    full_urls, preview_urls = extract_instagram_image_urls(page)
+    full_urls, preview_urls = extract_instagram_image_urls(page, shortcode)
     if not full_urls:
         logger.warning(
             "No full Instagram image metadata found for %s; "
