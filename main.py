@@ -14,7 +14,7 @@ import tempfile
 import time
 from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 from html.parser import HTMLParser
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
@@ -130,7 +130,7 @@ SOCIAL_MEDIA_URL_PATTERN = re.compile(
     r"facebook\.com|fb\.watch|"
     r"tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|"
     r"instagram\.com|"
-    r"xiaohongshu\.com|xhslink\.com|"
+    r"xiaohongshu\.com|rednote\.com|xhslink\.com|"
     r"twitter\.com|x\.com"
     r")[^\s<>]+",
     re.IGNORECASE,
@@ -145,6 +145,33 @@ INSTAGRAM_POST_PATTERN = re.compile(
     r"instagram\.com/p/([^/?#]+)",
     re.IGNORECASE,
 )
+
+
+def normalize_xiaohongshu_url(url: str) -> str:
+    """Unwrap RedNote share login pages into yt-dlp's Xiaohongshu URL form."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+
+    if host in {"rednote.com", "www.rednote.com"} and parsed.path.rstrip("/") == "/login":
+        redirect_path = parse_qs(parsed.query).get("redirectPath", [None])[0]
+        if redirect_path:
+            url = redirect_path
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+
+    if host in {"rednote.com", "www.rednote.com"}:
+        path = re.sub(r"^/discovery/item/", "/explore/", parsed.path)
+        if path != parsed.path:
+            return urlunparse((
+                "https",
+                "www.xiaohongshu.com",
+                path,
+                parsed.params,
+                parsed.query,
+                parsed.fragment,
+            ))
+
+    return url
 
 
 # ============================================================
@@ -1399,6 +1426,7 @@ def download_instagram_info_media(
 
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
+    url = normalize_xiaohongshu_url(url)
     parsed_url = urlparse(url)
     if parsed_url.hostname and parsed_url.hostname.lower() in {
         "xhslink.com",
@@ -1413,8 +1441,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             resolved_host = (urlparse(resolved_url).hostname or "").lower()
             if resolved_host == "xiaohongshu.com" or resolved_host.endswith(
                 ".xiaohongshu.com"
-            ):
-                url = resolved_url
+            ) or resolved_host in {"rednote.com", "www.rednote.com"}:
+                url = normalize_xiaohongshu_url(resolved_url)
         except (HTTPError, URLError, TimeoutError, OSError) as exc:
             logger.warning("Could not resolve Xiaohongshu short link %s: %s", url, exc)
 
