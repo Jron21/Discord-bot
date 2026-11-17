@@ -17,10 +17,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 from html.parser import HTMLParser
 from urllib.request import (
-    HTTPCookieProcessor,
-    ProxyHandler,
     Request,
-    build_opener,
     urlopen,
 )
 
@@ -43,77 +40,7 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
-INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
-INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
-INSTAGRAM_PROXY_URL = os.getenv("INSTAGRAM_PROXY_URL", "").strip()
 XIAOHONGSHU_COOKIE = os.getenv("XIAOHONGSHU_COOKIE", "").strip()
-_INSTAGRAM_COOKIE_TEMP_DIR = None
-
-
-def build_instagram_opener(cookie_jar=None):
-    """Build an opener that optionally routes Instagram requests through a proxy."""
-    handlers = []
-    if INSTAGRAM_PROXY_URL:
-        proxy_scheme = urlparse(INSTAGRAM_PROXY_URL).scheme.lower()
-        if proxy_scheme not in {"http", "https"}:
-            raise ValueError("INSTAGRAM_PROXY_URL must use http:// or https://")
-        handlers.append(
-            ProxyHandler({"http": INSTAGRAM_PROXY_URL, "https": INSTAGRAM_PROXY_URL})
-        )
-    if cookie_jar is not None:
-        handlers.append(HTTPCookieProcessor(cookie_jar))
-    return build_opener(*handlers)
-
-
-def instagram_urlopen(request, timeout=30):
-    """Open an Instagram page, using the optional proxy without changing CDN downloads."""
-    if INSTAGRAM_PROXY_URL:
-        return build_instagram_opener().open(request, timeout=timeout)
-    return urlopen(request, timeout=timeout)
-
-
-def get_instagram_cookie_file() -> str | None:
-    """Return a Netscape cookie file for yt-dlp, creating one from the env cookie if needed."""
-    global _INSTAGRAM_COOKIE_TEMP_DIR
-
-    if INSTAGRAM_COOKIES_FILE:
-        cookie_path = Path(INSTAGRAM_COOKIES_FILE).expanduser()
-        if cookie_path.is_file():
-            return str(cookie_path)
-        logger.warning(
-            "Configured INSTAGRAM_COOKIES_FILE does not exist: %s",
-            cookie_path,
-        )
-
-    if not INSTAGRAM_COOKIE:
-        return None
-
-    if _INSTAGRAM_COOKIE_TEMP_DIR is None:
-        _INSTAGRAM_COOKIE_TEMP_DIR = tempfile.TemporaryDirectory(
-            prefix="instagram-cookies-"
-        )
-
-    cookie_lines = ["# Netscape HTTP Cookie File"]
-    for item in INSTAGRAM_COOKIE.split(";"):
-        name, separator, value = item.strip().partition("=")
-        if not separator or not name or not value:
-            continue
-        if any(char in name + value for char in "\r\n\t"):
-            continue
-        cookie_lines.append(
-            f".instagram.com\tTRUE\t/\tTRUE\t0\t{name}\t{value}"
-        )
-
-    if len(cookie_lines) == 1:
-        return None
-
-    cookie_path = Path(_INSTAGRAM_COOKIE_TEMP_DIR.name) / "cookies.txt"
-    cookie_path.write_text("\n".join(cookie_lines) + "\n", encoding="utf-8")
-    try:
-        cookie_path.chmod(0o600)
-    except OSError:
-        pass
-    return str(cookie_path)
 
 
 def resolve_ffmpeg_path() -> str:
@@ -1164,16 +1091,13 @@ def download_instagram_html_images(
         "Accept": "text/html,application/xhtml+xml",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    if INSTAGRAM_COOKIE:
-        request_headers["Cookie"] = INSTAGRAM_COOKIE
-
     request = Request(
         url,
         headers=request_headers,
     )
 
     try:
-        with instagram_urlopen(request, timeout=30) as response:
+        with urlopen(request, timeout=30) as response:
             final_url = getattr(response, "geturl", lambda: url)()
             page = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
@@ -1284,64 +1208,6 @@ def download_instagram_html_images(
     return result
 
 
-def download_instagram_oembed_thumbnail(
-    shortcode: str,
-    directory: str,
-) -> list[Path]:
-    """Download Instagram's public oEmbed thumbnail without login cookies."""
-    post_url = f"https://www.instagram.com/p/{shortcode}/"
-    oembed_url = (
-        "https://www.instagram.com/api/v1/oembed/?"
-        + urlencode({"url": post_url})
-    )
-    request = Request(
-        oembed_url,
-        headers={
-            "User-Agent": BROWSER_USER_AGENT,
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with instagram_urlopen(request, timeout=20) as response:
-            data = json.loads(response.read().decode("utf-8", errors="replace"))
-    except (HTTPError, URLError, TimeoutError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-        logger.warning("Instagram oEmbed fallback failed for %s: %s", shortcode, exc)
-        return []
-
-    thumbnail_url = data.get("thumbnail_url") if isinstance(data, dict) else None
-    if not isinstance(thumbnail_url, str):
-        logger.warning("Instagram oEmbed returned no thumbnail for %s", shortcode)
-        return []
-
-    parsed_thumbnail = urlparse(thumbnail_url)
-    thumbnail_host = (parsed_thumbnail.hostname or "").lower()
-    is_instagram_cdn = (
-        thumbnail_host == "cdninstagram.com"
-        or thumbnail_host.endswith(".cdninstagram.com")
-        or thumbnail_host == "fbcdn.net"
-        or thumbnail_host.endswith(".fbcdn.net")
-    )
-    if parsed_thumbnail.scheme.lower() != "https" or not is_instagram_cdn:
-        logger.warning("Instagram oEmbed returned an untrusted thumbnail URL for %s", shortcode)
-        return []
-
-    thumbnail_path = download_image_url(
-        thumbnail_url,
-        directory,
-        f"instagram-{shortcode}-preview",
-    )
-    if thumbnail_path is None:
-        logger.warning("Could not download Instagram oEmbed thumbnail for %s", shortcode)
-        return []
-
-    logger.info(
-        "Instagram oEmbed fallback downloaded one preview thumbnail for %s; "
-        "it does not include the full carousel",
-        shortcode,
-    )
-    return [thumbnail_path]
-
-
 def download_instagram_media(url: str, directory: str) -> list[Path]:
     """Download all available media from a public Instagram post or carousel."""
     match = INSTAGRAM_POST_PATTERN.search(url)
@@ -1369,19 +1235,16 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         "X-IG-App-ID": app_id,
         "X-Requested-With": "XMLHttpRequest",
     }
-    if INSTAGRAM_COOKIE:
-        headers["Cookie"] = INSTAGRAM_COOKIE
-
     cookie_jar = CookieJar()
-    opener = build_instagram_opener(cookie_jar)
+    from urllib.request import HTTPCookieProcessor, build_opener
+
+    opener = build_opener(HTTPCookieProcessor(cookie_jar))
 
     try:
         home_headers = {
             "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml",
         }
-        if INSTAGRAM_COOKIE:
-            home_headers["Cookie"] = INSTAGRAM_COOKIE
         home_request = Request(instagram_home, headers=home_headers)
         with opener.open(home_request, timeout=30) as response:
             home_page = response.read().decode("utf-8", errors="replace")
@@ -1404,16 +1267,6 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
             ),
             None,
         )
-        if not csrf_token and INSTAGRAM_COOKIE:
-            csrf_token = next(
-                (
-                    value.strip('"')
-                    for item in INSTAGRAM_COOKIE.split(";")
-                    for name, separator, value in [item.strip().partition("=")]
-                    if separator and name.strip() == "csrftoken"
-                ),
-                None,
-            )
         if not csrf_token:
             logger.warning(
                 "Instagram did not provide a CSRF token for %s",
@@ -1630,22 +1483,7 @@ def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
     try:
         loader = instaloader.Instaloader()
         cookie_jar = getattr(loader.context, "_session", None)
-        if cookie_jar is not None and INSTAGRAM_PROXY_URL:
-            cookie_jar.proxies.update(
-                {"http": INSTAGRAM_PROXY_URL, "https": INSTAGRAM_PROXY_URL}
-            )
         cookie_jar = getattr(cookie_jar, "cookies", None)
-        if cookie_jar is not None and INSTAGRAM_COOKIE:
-            for item in INSTAGRAM_COOKIE.split(";"):
-                name, separator, value = item.strip().partition("=")
-                if separator and name and value:
-                    cookie_jar.set(
-                        name,
-                        value,
-                        domain=".instagram.com",
-                        path="/",
-                        secure=True,
-                    )
         post = instaloader.Post.from_shortcode(loader.context, shortcode)
     except Exception as exc:  # pragma: no cover - defensive fallback.
         logger.warning("Instaloader could not fetch Instagram post %s: %s", shortcode, exc)
@@ -1845,11 +1683,6 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             "User-Agent": BROWSER_USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
         }
-        if INSTAGRAM_PROXY_URL:
-            options["proxy"] = INSTAGRAM_PROXY_URL
-        cookie_path = get_instagram_cookie_file()
-        if cookie_path:
-            options["cookiefile"] = cookie_path
     elif is_xiaohongshu_url:
         options["http_headers"] = {
             "User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT,
@@ -1874,16 +1707,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 )
                 if instagram_media:
                     return instagram_media
-                instagram_media = download_instagram_oembed_thumbnail(
-                    shortcode,
-                    directory,
-                )
-                if instagram_media:
-                    return instagram_media
                 raise DownloadError(
                     "Instagram did not provide downloadable media; "
-                    "the public page, media metadata, and oEmbed thumbnail "
-                    "fallbacks were unavailable"
+                    "full media metadata was unavailable"
                 ) from None
             twitter_image = download_twitter_image(url, directory)
             if twitter_image is not None:
@@ -1919,16 +1745,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             )
             if instagram_media:
                 return instagram_media
-            instagram_media = download_instagram_oembed_thumbnail(
-                shortcode,
-                directory,
-            )
-            if instagram_media:
-                return instagram_media
             raise DownloadError(
                 "Instagram did not provide downloadable media; "
-                "the public page, media metadata, and oEmbed thumbnail "
-                "fallbacks were unavailable"
+                "full media metadata was unavailable"
             )
 
         entries = list(info.get("entries") or [info])

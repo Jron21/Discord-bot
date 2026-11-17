@@ -9,47 +9,6 @@ import main
 
 
 class InstagramPreviewFallbackTests(unittest.TestCase):
-    def test_oembed_thumbnail_fallback_uses_public_endpoint_without_cookie(self):
-        thumbnail_url = "https://scontent.cdninstagram.com/preview.jpg"
-        response = io.BytesIO(json.dumps({"thumbnail_url": thumbnail_url}).encode())
-        with (
-            patch.object(main, "INSTAGRAM_PROXY_URL", ""),
-            patch.object(main, "urlopen", return_value=response) as open_url,
-            patch.object(main, "download_image_url", return_value=Path("preview.jpg")) as save_image,
-        ):
-            paths = main.download_instagram_oembed_thumbnail(
-                "Dfzrs4OHSuQ",
-                ".",
-            )
-
-        self.assertEqual(paths, [Path("preview.jpg")])
-        request = open_url.call_args.args[0]
-        self.assertIn("/api/v1/oembed/", request.full_url)
-        self.assertIsNone(request.get_header("Cookie"))
-        save_image.assert_called_once_with(
-            thumbnail_url,
-            ".",
-            "instagram-Dfzrs4OHSuQ-preview",
-        )
-
-    def test_instagram_urlopen_uses_configured_proxy(self):
-        opener = MagicMock()
-        request = object()
-        with (
-            patch.object(main, "INSTAGRAM_PROXY_URL", "http://proxy.example:8080"),
-            patch.object(main, "build_instagram_opener", return_value=opener) as factory,
-        ):
-            result = main.instagram_urlopen(request, timeout=12)
-
-        factory.assert_called_once_with()
-        opener.open.assert_called_once_with(request, timeout=12)
-        self.assertEqual(result, opener.open.return_value)
-
-    def test_instagram_proxy_rejects_unsupported_scheme(self):
-        with patch.object(main, "INSTAGRAM_PROXY_URL", "socks5://proxy.example:1080"):
-            with self.assertRaisesRegex(ValueError, "http:// or https://"):
-                main.build_instagram_opener()
-
     def test_html_fallback_stops_on_risky_contactpoint_redirect(self):
         response = MagicMock()
         response.__enter__.return_value = response
@@ -126,11 +85,10 @@ class InstagramPreviewFallbackTests(unittest.TestCase):
                     ),
                 ),
                 patch.object(main, "download_open_graph_image") as open_graph,
-                patch.object(main, "download_instagram_oembed_thumbnail", return_value=[]),
                 patch.object(main, "download_image_url") as download_image,
                 self.assertRaisesRegex(
                     main.DownloadError,
-                    "oEmbed thumbnail fallbacks were unavailable",
+                    "full media metadata was unavailable",
                 ),
             ):
                 main.download_social_media(
@@ -162,10 +120,9 @@ class InstagramPreviewFallbackTests(unittest.TestCase):
                     ),
                 ),
                 patch.object(main, "download_open_graph_image") as open_graph,
-                patch.object(main, "download_instagram_oembed_thumbnail", return_value=[]),
                 self.assertRaisesRegex(
                     main.DownloadError,
-                    "oEmbed thumbnail fallbacks were unavailable",
+                    "full media metadata was unavailable",
                 ),
             ):
                 main.download_social_media(
