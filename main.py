@@ -39,6 +39,7 @@ TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
 INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
+XIAOHONGSHU_COOKIE = os.getenv("XIAOHONGSHU_COOKIE", "").strip()
 _INSTAGRAM_COOKIE_TEMP_DIR = None
 
 
@@ -117,6 +118,11 @@ BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
+)
+XIAOHONGSHU_MOBILE_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
+    "Mobile/15E148 Safari/604.1"
 )
 
 logging.basicConfig(
@@ -1438,7 +1444,10 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     }:
         # yt-dlp's XiaoHongShu extractor handles the destination URL, while
         # xhslink.com is only a share-link redirector.
-        request = Request(url, headers={"User-Agent": BROWSER_USER_AGENT})
+        request = Request(
+            url,
+            headers={"User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT},
+        )
         try:
             with urlopen(request, timeout=20) as response:
                 resolved_url = response.geturl()
@@ -1500,6 +1509,16 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         cookie_path = get_instagram_cookie_file()
         if cookie_path:
             options["cookiefile"] = cookie_path
+    elif is_xiaohongshu_url:
+        options["http_headers"] = {
+            "User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT,
+            "Referer": "https://www.xiaohongshu.com/",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        if XIAOHONGSHU_COOKIE and not any(
+            char in XIAOHONGSHU_COOKIE for char in "\r\n"
+        ):
+            options["http_headers"]["Cookie"] = XIAOHONGSHU_COOKIE
 
     with YoutubeDL(options) as downloader:
         try:
@@ -1581,7 +1600,19 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                         image_url,
                         directory,
                         f"{entry.get('id', 'xiaohongshu')}-{entry_index}-{image_index}",
-                        headers={"Referer": "https://www.xiaohongshu.com/"},
+                        headers={
+                            "User-Agent": XIAOHONGSHU_MOBILE_USER_AGENT,
+                            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                            "Referer": "https://www.xiaohongshu.com/",
+                            **(
+                                {"Cookie": XIAOHONGSHU_COOKIE}
+                                if XIAOHONGSHU_COOKIE
+                                and not any(
+                                    char in XIAOHONGSHU_COOKIE for char in "\r\n"
+                                )
+                                else {}
+                            ),
+                        },
                     )
                     if image_path is not None:
                         image_paths.append(image_path)
@@ -1591,6 +1622,10 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 "Xiaohongshu image extraction found %s thumbnails but downloaded %s",
                 thumbnail_count,
                 len(image_paths),
+            )
+            raise DownloadError(
+                "Xiaohongshu returned no downloadable image URLs; the request may "
+                "have been blocked or the note's media format may be unsupported."
             )
 
         video_entry = next(
