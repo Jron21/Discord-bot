@@ -87,7 +87,7 @@ async def interactions(request: Request) -> JSONResponse:
     url = find_option(data.get("options") or [], "url")
     if not isinstance(url, str) or SOCIAL_MEDIA_URL_PATTERN.fullmatch(url.strip()) is None:
         return interaction_response(
-            "Use a Facebook, TikTok, Instagram, Twitter, or X link."
+            "Use a Facebook, TikTok, Instagram, Xiaohongshu, Twitter, or X link."
         )
 
     try:

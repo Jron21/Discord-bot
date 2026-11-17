@@ -130,6 +130,7 @@ SOCIAL_MEDIA_URL_PATTERN = re.compile(
     r"facebook\.com|fb\.watch|"
     r"tiktok\.com|vm\.tiktok\.com|vt\.tiktok\.com|"
     r"instagram\.com|"
+    r"xiaohongshu\.com|xhslink\.com|"
     r"twitter\.com|x\.com"
     r")[^\s<>]+",
     re.IGNORECASE,
@@ -1398,6 +1399,25 @@ def download_instagram_info_media(
 
 def download_social_media(url: str, directory: str) -> list[Path]:
     """Download videos or images from a supported social-media item."""
+    parsed_url = urlparse(url)
+    if parsed_url.hostname and parsed_url.hostname.lower() in {
+        "xhslink.com",
+        "www.xhslink.com",
+    }:
+        # yt-dlp's XiaoHongShu extractor handles the destination URL, while
+        # xhslink.com is only a share-link redirector.
+        request = Request(url, headers={"User-Agent": BROWSER_USER_AGENT})
+        try:
+            with urlopen(request, timeout=20) as response:
+                resolved_url = response.geturl()
+            resolved_host = (urlparse(resolved_url).hostname or "").lower()
+            if resolved_host == "xiaohongshu.com" or resolved_host.endswith(
+                ".xiaohongshu.com"
+            ):
+                url = resolved_url
+        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+            logger.warning("Could not resolve Xiaohongshu short link %s: %s", url, exc)
+
     is_twitter_status = TWITTER_TWEET_ID_PATTERN.search(url) is not None
     instagram_match = INSTAGRAM_POST_PATTERN.search(url)
     is_instagram_post = instagram_match is not None
@@ -2149,7 +2169,7 @@ async def on_message(message: discord.Message):
         url_match = SOCIAL_MEDIA_URL_PATTERN.search(url or "")
         if url_match is None:
             await message.reply(
-                "Use `!sora <Facebook, TikTok, Instagram, Twitter, or X link>.",
+                "Use `!sora <Facebook, TikTok, Instagram, Xiaohongshu, Twitter, or X link>.",
                 mention_author=False,
             )
             return
@@ -2282,7 +2302,7 @@ async def test(interaction: discord.Interaction):
 
 @bot.tree.command(
     name="download",
-    description="Download media from Facebook, TikTok, Instagram, or X",
+    description="Download media from Facebook, TikTok, Instagram, Xiaohongshu, or X",
 )
 @discord.app_commands.allowed_installs(guilds=True, users=True)
 @discord.app_commands.allowed_contexts(
@@ -2315,7 +2335,7 @@ async def send_downloaded_media(
     url = url.strip()
     if SOCIAL_MEDIA_URL_PATTERN.fullmatch(url) is None:
         await interaction.response.send_message(
-            "Use a Facebook, TikTok, Instagram, Twitter, or X link.",
+            "Use a Facebook, TikTok, Instagram, Xiaohongshu, Twitter, or X link.",
             ephemeral=True,
         )
         return
@@ -2711,7 +2731,7 @@ async def local_test(ctx: commands.Context):
 async def send_local_media(ctx: commands.Context, url: str) -> None:
     url_match = SOCIAL_MEDIA_URL_PATTERN.fullmatch(url.strip())
     if url_match is None:
-        await ctx.send("Use a Facebook, TikTok, Instagram, Twitter, or X link.")
+        await ctx.send("Use a Facebook, TikTok, Instagram, Xiaohongshu, Twitter, or X link.")
         return
     await extract_social_media(ctx.message, url_match.group(0))
 
