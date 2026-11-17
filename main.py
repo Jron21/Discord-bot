@@ -1451,6 +1451,13 @@ def download_social_media(url: str, directory: str) -> list[Path]:
     is_instagram_post = instagram_match is not None
     parsed_url = urlparse(url)
     is_tiktok_url = bool(parsed_url.hostname and "tiktok.com" in parsed_url.hostname.lower())
+    is_xiaohongshu_url = bool(
+        parsed_url.hostname
+        and (
+            parsed_url.hostname.lower() == "xiaohongshu.com"
+            or parsed_url.hostname.lower().endswith(".xiaohongshu.com")
+        )
+    )
 
     if is_instagram_post:
         instagram_media = download_instagram_media(url, directory)
@@ -1478,6 +1485,9 @@ def download_social_media(url: str, directory: str) -> list[Path]:
         "no_warnings": True,
         "restrictfilenames": True,
     }
+    if is_xiaohongshu_url:
+        # Image-only Xiaohongshu notes have thumbnails but no video formats.
+        options["ignore_no_formats_error"] = True
     if is_instagram_post:
         options["http_headers"] = {
             "User-Agent": BROWSER_USER_AGENT,
@@ -1544,6 +1554,32 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             )
 
         entries = list(info.get("entries") or [info])
+
+        if is_xiaohongshu_url and not any(entry.get("formats") for entry in entries):
+            image_paths = []
+            seen_image_keys = set()
+            for entry_index, entry in enumerate(entries):
+                for image_index, thumbnail in enumerate(entry.get("thumbnails") or []):
+                    image_url = thumbnail.get("url")
+                    if not image_url:
+                        continue
+                    image_parts = urlparse(image_url)
+                    image_key = (
+                        image_parts.hostname,
+                        image_parts.path,
+                    )
+                    if image_key in seen_image_keys:
+                        continue
+                    seen_image_keys.add(image_key)
+                    image_path = download_image_url(
+                        image_url,
+                        directory,
+                        f"{entry.get('id', 'xiaohongshu')}-{entry_index}-{image_index}",
+                    )
+                    if image_path is not None:
+                        image_paths.append(image_path)
+            if image_paths:
+                return image_paths
 
         video_entry = next(
             (entry for entry in entries if entry.get("formats")),
