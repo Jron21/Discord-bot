@@ -16,7 +16,13 @@ from http.cookiejar import CookieJar
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 from html.parser import HTMLParser
-from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
+from urllib.request import (
+    HTTPCookieProcessor,
+    ProxyHandler,
+    Request,
+    build_opener,
+    urlopen,
+)
 
 import discord
 from dotenv import load_dotenv
@@ -39,8 +45,31 @@ TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("DISCORD_BOT_TOKEN")
 MAX_MEDIA_BYTES = int(os.getenv("MAX_MEDIA_BYTES", 24 * 1024 * 1024))
 INSTAGRAM_COOKIE = os.getenv("INSTAGRAM_COOKIE", "").strip()
 INSTAGRAM_COOKIES_FILE = os.getenv("INSTAGRAM_COOKIES_FILE", "").strip()
+INSTAGRAM_PROXY_URL = os.getenv("INSTAGRAM_PROXY_URL", "").strip()
 XIAOHONGSHU_COOKIE = os.getenv("XIAOHONGSHU_COOKIE", "").strip()
 _INSTAGRAM_COOKIE_TEMP_DIR = None
+
+
+def build_instagram_opener(cookie_jar=None):
+    """Build an opener that optionally routes Instagram requests through a proxy."""
+    handlers = []
+    if INSTAGRAM_PROXY_URL:
+        proxy_scheme = urlparse(INSTAGRAM_PROXY_URL).scheme.lower()
+        if proxy_scheme not in {"http", "https"}:
+            raise ValueError("INSTAGRAM_PROXY_URL must use http:// or https://")
+        handlers.append(
+            ProxyHandler({"http": INSTAGRAM_PROXY_URL, "https": INSTAGRAM_PROXY_URL})
+        )
+    if cookie_jar is not None:
+        handlers.append(HTTPCookieProcessor(cookie_jar))
+    return build_opener(*handlers)
+
+
+def instagram_urlopen(request, timeout=30):
+    """Open an Instagram page, using the optional proxy without changing CDN downloads."""
+    if INSTAGRAM_PROXY_URL:
+        return build_instagram_opener().open(request, timeout=timeout)
+    return urlopen(request, timeout=timeout)
 
 
 def get_instagram_cookie_file() -> str | None:
@@ -1144,7 +1173,8 @@ def download_instagram_html_images(
     )
 
     try:
-        with urlopen(request, timeout=30) as response:
+        with instagram_urlopen(request, timeout=30) as response:
+            final_url = getattr(response, "geturl", lambda: url)()
             page = response.read().decode("utf-8", errors="replace")
     except HTTPError as exc:
         logger.warning(
@@ -1165,6 +1195,21 @@ def download_instagram_html_images(
             "Instagram page fallback failed for %s: %s",
             shortcode,
             exc,
+        )
+        return []
+
+    final_path = urlparse(final_url).path.lower()
+    if any(
+        marker in final_path
+        for marker in (
+            "/challenge/",
+            "/accounts/login",
+            "/accounts/update_risky_contactpoint/",
+        )
+    ):
+        logger.warning(
+            "Instagram page fallback was redirected to a login/challenge page for %s",
+            shortcode,
         )
         return []
 
@@ -1270,7 +1315,7 @@ def download_instagram_media(url: str, directory: str) -> list[Path]:
         headers["Cookie"] = INSTAGRAM_COOKIE
 
     cookie_jar = CookieJar()
-    opener = build_opener(HTTPCookieProcessor(cookie_jar))
+    opener = build_instagram_opener(cookie_jar)
 
     try:
         home_headers = {
@@ -1527,6 +1572,10 @@ def download_instagram_sidecar_media(url: str, directory: str) -> list[Path]:
     try:
         loader = instaloader.Instaloader()
         cookie_jar = getattr(loader.context, "_session", None)
+        if cookie_jar is not None and INSTAGRAM_PROXY_URL:
+            cookie_jar.proxies.update(
+                {"http": INSTAGRAM_PROXY_URL, "https": INSTAGRAM_PROXY_URL}
+            )
         cookie_jar = getattr(cookie_jar, "cookies", None)
         if cookie_jar is not None and INSTAGRAM_COOKIE:
             for item in INSTAGRAM_COOKIE.split(";"):
@@ -1738,6 +1787,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
             "User-Agent": BROWSER_USER_AGENT,
             "Accept-Language": "en-US,en;q=0.9",
         }
+        if INSTAGRAM_PROXY_URL:
+            options["proxy"] = INSTAGRAM_PROXY_URL
         cookie_path = get_instagram_cookie_file()
         if cookie_path:
             options["cookiefile"] = cookie_path

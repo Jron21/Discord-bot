@@ -9,6 +9,44 @@ import main
 
 
 class InstagramPreviewFallbackTests(unittest.TestCase):
+    def test_instagram_urlopen_uses_configured_proxy(self):
+        opener = MagicMock()
+        request = object()
+        with (
+            patch.object(main, "INSTAGRAM_PROXY_URL", "http://proxy.example:8080"),
+            patch.object(main, "build_instagram_opener", return_value=opener) as factory,
+        ):
+            result = main.instagram_urlopen(request, timeout=12)
+
+        factory.assert_called_once_with()
+        opener.open.assert_called_once_with(request, timeout=12)
+        self.assertEqual(result, opener.open.return_value)
+
+    def test_instagram_proxy_rejects_unsupported_scheme(self):
+        with patch.object(main, "INSTAGRAM_PROXY_URL", "socks5://proxy.example:1080"):
+            with self.assertRaisesRegex(ValueError, "http:// or https://"):
+                main.build_instagram_opener()
+
+    def test_html_fallback_stops_on_risky_contactpoint_redirect(self):
+        response = MagicMock()
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        response.geturl.return_value = (
+            "https://www.instagram.com/accounts/update_risky_contactpoint/"
+        )
+        response.read.return_value = b"Instagram challenge"
+
+        with patch.object(main, "urlopen", return_value=response):
+            with self.assertLogs(main.logger, level="WARNING") as captured:
+                media = main.download_instagram_html_images(
+                    "https://www.instagram.com/p/Dfzrs4OHSuQ/",
+                    "Dfzrs4OHSuQ",
+                    ".",
+                )
+
+        self.assertEqual(media, [])
+        self.assertIn("login/challenge page", "\n".join(captured.output))
+
     def test_extracts_transcoded_heic_carousel_candidates(self):
         shortcode = "Dfzrs4OHSuQ"
         image_urls = [
