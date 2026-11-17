@@ -1100,14 +1100,20 @@ def extract_instagram_image_urls(
                 or hostname == "fbcdn.net"
                 or hostname.endswith(".fbcdn.net")
             )
-            if (
-                parsed_url.scheme.lower() == "https"
-                and is_instagram_cdn
-                and re.search(
+            has_downloadable_image_extension = bool(
+                re.search(
                     r"\.(?:jpe?g|png|webp|avif)(?:\?|$)",
                     cleaned,
                     re.IGNORECASE,
                 )
+            ) or (
+                Path(parsed_url.path).suffix.lower() == ".heic"
+                and "dst-jpg" in cleaned.lower()
+            )
+            if (
+                parsed_url.scheme.lower() == "https"
+                and is_instagram_cdn
+                and has_downloadable_image_extension
             ):
                 cleaned_urls.append(cleaned)
         return list(dict.fromkeys(cleaned_urls))
@@ -1761,7 +1767,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                     return instagram_media
                 raise DownloadError(
                     "Instagram did not provide downloadable media; "
-                    "no full image metadata was available, so previews were skipped"
+                    "no full image metadata was available, so preview thumbnails "
+                    "are not sent"
                 ) from None
             twitter_image = download_twitter_image(url, directory)
             if twitter_image is not None:
@@ -1799,7 +1806,8 @@ def download_social_media(url: str, directory: str) -> list[Path]:
                 return instagram_media
             raise DownloadError(
                 "Instagram did not provide full media metadata; "
-                "no full image metadata was available, so previews were skipped"
+                "no full image metadata was available, so preview thumbnails "
+                "are not sent"
             )
 
         entries = list(info.get("entries") or [info])

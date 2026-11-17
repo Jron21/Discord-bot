@@ -9,6 +9,38 @@ import main
 
 
 class InstagramPreviewFallbackTests(unittest.TestCase):
+    def test_extracts_transcoded_heic_carousel_candidates(self):
+        shortcode = "Dfzrs4OHSuQ"
+        image_urls = [
+            "https://scontent.cdninstagram.com/full-one.heic?stp=dst-jpg_e35",
+            "https://scontent.cdninstagram.com/full-two.heic?stp=dst-jpg_e35",
+        ]
+        page = json.dumps({
+            "code": shortcode,
+            "media_type": 8,
+            "carousel_media": [
+                {
+                    "media_type": 1,
+                    "image_versions2": {
+                        "candidates": [{
+                            "url": image_url,
+                            "width": 1440,
+                            "height": 1920,
+                        }],
+                    },
+                }
+                for image_url in image_urls
+            ],
+        })
+
+        full_urls, preview_urls = main.extract_instagram_image_urls(
+            page,
+            shortcode,
+        )
+
+        self.assertEqual(full_urls, image_urls)
+        self.assertEqual(preview_urls, [])
+
     def test_thumbnail_only_metadata_is_rejected(self):
         downloader = MagicMock()
         downloader.__enter__.return_value = downloader
